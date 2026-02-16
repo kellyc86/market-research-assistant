@@ -403,7 +403,15 @@ def render_step_1(llm: ChatGoogleGenerativeAI):
             try:
                 result = validate_industry(llm, industry)
             except Exception as e:
-                st.error(f"Validation failed: {e}")
+                error_msg = str(e).lower()
+                if "api key" in error_msg or "api_key" in error_msg:
+                    st.error(
+                        "Invalid API key. Please check your Google AI API key "
+                        "in the sidebar and try again. You can get a free key "
+                        "from [Google AI Studio](https://aistudio.google.com/apikey)."
+                    )
+                else:
+                    st.error(f"Validation failed: {e}")
                 return
 
         if result["is_valid"]:
@@ -453,7 +461,13 @@ def render_step_2(llm: ChatGoogleGenerativeAI):
                 st.session_state.wiki_pages = top_pages
 
             except Exception as e:
-                st.error(f"Retrieval failed: {e}")
+                error_msg = str(e).lower()
+                if "api key" in error_msg or "api_key" in error_msg:
+                    st.error(
+                        "Invalid API key. Please check your key in the sidebar."
+                    )
+                else:
+                    st.error(f"Retrieval failed: {e}")
                 return
 
     # Display the 5 selected sources
@@ -484,7 +498,13 @@ def render_step_3(llm: ChatGoogleGenerativeAI):
                 st.session_state.report = report
                 st.session_state.current_step = 4
             except Exception as e:
-                st.error(f"Report generation failed: {e}")
+                error_msg = str(e).lower()
+                if "api key" in error_msg or "api_key" in error_msg:
+                    st.error(
+                        "Invalid API key. Please check your key in the sidebar."
+                    )
+                else:
+                    st.error(f"Report generation failed: {e}")
                 return
 
     # Display the report
