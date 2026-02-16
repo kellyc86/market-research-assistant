@@ -30,8 +30,8 @@ from langchain_core.output_parsers import StrOutputParser
 # ──────────────────────────────────────────────────────────────
 APP_TITLE = "Market Research Assistant"
 APP_ICON = "📊"
-LLM_OPTIONS = ["Gemini 2.0 Flash"]
-LLM_MODEL_MAP = {"Gemini 2.0 Flash": "gemini-2.0-flash"}
+LLM_OPTIONS = ["Gemini 2.5 Flash"]
+LLM_MODEL_MAP = {"Gemini 2.5 Flash": "gemini-2.5-flash"}
 DEFAULT_TEMPERATURE = 0.2          # Low temperature for factual output
 MAX_WIKI_RESULTS = 8               # Retrieve more, then filter to best 5
 FINAL_SOURCE_COUNT = 5             # Exactly 5 URLs returned to user
@@ -41,6 +41,28 @@ MAX_REPORT_WORDS = 480             # Target word count (buffer under 500)
 # ──────────────────────────────────────────────────────────────
 # HELPER FUNCTIONS — modular pipeline stages
 # ──────────────────────────────────────────────────────────────
+
+def handle_api_error(e: Exception, context: str = "Operation") -> None:
+    """Display a user-friendly error message for common API failures.
+
+    Centralised error handling ensures consistent messaging and avoids
+    exposing raw API error details to the end user.
+    """
+    error_msg = str(e).lower()
+    if "api key" in error_msg or "api_key" in error_msg:
+        st.error(
+            "**Invalid API key.** Please check your Google AI API key "
+            "in the sidebar. Get a free key from "
+            "[Google AI Studio](https://aistudio.google.com/apikey)."
+        )
+    elif "resource_exhausted" in error_msg or "429" in error_msg or "quota" in error_msg:
+        st.warning(
+            "**Rate limit reached.** The free API tier has usage limits. "
+            "Please wait 1-2 minutes and try again."
+        )
+    else:
+        st.error(f"{context} failed: {e}")
+
 
 def initialise_llm(model_name: str, api_key: str) -> ChatGoogleGenerativeAI:
     """Create a LangChain LLM instance with the given configuration.
@@ -403,15 +425,7 @@ def render_step_1(llm: ChatGoogleGenerativeAI):
             try:
                 result = validate_industry(llm, industry)
             except Exception as e:
-                error_msg = str(e).lower()
-                if "api key" in error_msg or "api_key" in error_msg:
-                    st.error(
-                        "Invalid API key. Please check your Google AI API key "
-                        "in the sidebar and try again. You can get a free key "
-                        "from [Google AI Studio](https://aistudio.google.com/apikey)."
-                    )
-                else:
-                    st.error(f"Validation failed: {e}")
+                handle_api_error(e, "Validation")
                 return
 
         if result["is_valid"]:
@@ -461,13 +475,7 @@ def render_step_2(llm: ChatGoogleGenerativeAI):
                 st.session_state.wiki_pages = top_pages
 
             except Exception as e:
-                error_msg = str(e).lower()
-                if "api key" in error_msg or "api_key" in error_msg:
-                    st.error(
-                        "Invalid API key. Please check your key in the sidebar."
-                    )
-                else:
-                    st.error(f"Retrieval failed: {e}")
+                handle_api_error(e, "Retrieval")
                 return
 
     # Display the 5 selected sources
@@ -498,13 +506,7 @@ def render_step_3(llm: ChatGoogleGenerativeAI):
                 st.session_state.report = report
                 st.session_state.current_step = 4
             except Exception as e:
-                error_msg = str(e).lower()
-                if "api key" in error_msg or "api_key" in error_msg:
-                    st.error(
-                        "Invalid API key. Please check your key in the sidebar."
-                    )
-                else:
-                    st.error(f"Report generation failed: {e}")
+                handle_api_error(e, "Report generation")
                 return
 
     # Display the report
