@@ -320,13 +320,14 @@ def generate_report(
     industry: str,
     pages: list[dict],
 ) -> str:
-    """Generate a structured industry report (<500 words) from Wikipedia sources.
+    """Generate a structured, executive-ready industry report (<500 words).
 
-    The prompt is carefully engineered to produce analyst-grade output:
-    - Structured sections (overview, drivers, risks, outlook)
+    The prompt is engineered to produce consulting-grade output:
+    - Executive summary with strategic implications
+    - Market structure and competitive dynamics analysis
+    - Key data table summarising quantitative findings
+    - Strategic interpretation (insight over description)
     - Inline citations referencing specific Wikipedia source titles
-    - Evidence-based language ('According to...', 'Data suggests...')
-    - Synthesis across sources (not copy-paste from one page)
     - Hard word limit enforced both in prompt and programmatically
 
     Design choice: we pass the full content of all 5 pages to give
@@ -348,37 +349,67 @@ def generate_report(
 
     prompt = ChatPromptTemplate.from_messages([
         ("system",
-         "You are a senior market research analyst at a large corporation. "
-         "Write a concise industry report based ONLY on the provided "
-         "Wikipedia sources. Do NOT invent facts beyond what the sources "
-         "contain.\n\n"
-         "REPORT REQUIREMENTS:\n"
-         "1. STRICTLY under {max_words} words — this is a HARD limit. "
-         "Aim for 400-470 words.\n"
-         "2. Use this structure with markdown headings:\n"
-         "   ## Industry Overview\n"
-         "   Definition, scope, market structure, and size.\n"
-         "   ## Key Drivers & Trends\n"
-         "   Growth factors, technology shifts, demand dynamics.\n"
-         "   ## Competitive Landscape\n"
-         "   Major players, market concentration, competitive dynamics.\n"
-         "   ## Risks & Challenges\n"
-         "   Regulatory, economic, operational, and emerging threats.\n"
-         "   ## Outlook\n"
-         "   Future direction based on available evidence.\n\n"
-         "3. CITE your sources inline using the Wikipedia page titles. "
-         "Available sources: {source_titles}. "
-         "Use phrases like: 'According to the Wikipedia article on [Title]...', "
-         "'Data from [Title] suggests...', 'As noted in [Title]...'\n"
-         "4. SYNTHESISE across multiple sources in each section. Do NOT "
-         "summarise each source separately.\n"
-         "5. Write in a professional, analytical tone suitable for "
-         "a business audience. Compare trends, highlight key drivers, "
-         "identify risks, and discuss market structure.\n"
-         "6. Do NOT include a word count line at the end."),
+         "You are a senior market intelligence analyst preparing a "
+         "professional industry report for a corporate strategy team.\n\n"
+         "Generate a concise, executive-ready industry report that "
+         "strictly follows the rules below.\n\n"
+         "================================ INPUT\n"
+         "You will receive the industry name and extracted text from "
+         "five Wikipedia pages. Available sources: {source_titles}.\n"
+         "You MUST base your report ONLY on those five sources.\n"
+         "Do NOT use outside knowledge. Do NOT invent facts. Do NOT "
+         "add statistics not present in the provided material.\n"
+         "If information is missing, state: 'Data not available in "
+         "retrieved sources.'\n\n"
+         "================================ WORD LIMIT\n"
+         "Maximum: {max_words} words. Target range: 430-480 words.\n"
+         "If output exceeds {max_words} words, rewrite more concisely.\n\n"
+         "================================ MANDATORY STRUCTURE\n"
+         "Use markdown headings (##) and this exact order:\n\n"
+         "## Executive Summary\n"
+         "Key insight, strategic implication, and recommendation in "
+         "2-3 sentences.\n\n"
+         "## Industry Overview\n"
+         "Definition, scope, and scale indicators.\n\n"
+         "## Market Structure & Competitive Dynamics\n"
+         "Key segments, major players, level of competition, "
+         "differentiation factors, barriers to entry.\n\n"
+         "## Growth Drivers\n"
+         "Economic, technological, and behavioural factors.\n\n"
+         "## Risks & Constraints\n"
+         "Regulatory, structural, and operational risks.\n\n"
+         "## Key Data\n"
+         "Include a compact markdown table summarising the most "
+         "decision-relevant quantitative figures found in the sources. "
+         "If no quantitative data is available, state this explicitly.\n\n"
+         "## Strategic Interpretation\n"
+         "Explain what the findings mean for decision-makers. Do not "
+         "repeat numbers. Interpret them.\n\n"
+         "## Final Takeaway\n"
+         "One strong concluding insight in 1-2 sentences.\n\n"
+         "================================ ANALYTICAL STANDARDS\n"
+         "The report must:\n"
+         "- Synthesise information across sources\n"
+         "- Compare information where possible\n"
+         "- Highlight contradictions if present\n"
+         "- Prioritise insight over description\n"
+         "- Clearly distinguish facts vs interpretation\n"
+         "- Cite sources inline using their titles\n\n"
+         "================================ WRITING STYLE\n"
+         "Tone: concise, analytical, objective, professional, confident.\n"
+         "Avoid: fluff, generic phrases, marketing language, repetition.\n"
+         "Each sentence must add value.\n\n"
+         "================================ QUALITY CONTROL\n"
+         "Before output, verify:\n"
+         "- Under {max_words} words\n"
+         "- Only source-supported claims\n"
+         "- Logical structure\n"
+         "- Executive readability\n"
+         "- No repetition\n"
+         "Do NOT include a word count line at the end.\n"
+         "Output ONLY the final report."),
         ("human",
-         "Write an industry report on: **{industry}**\n\n"
-         "Sources:\n{sources}"),
+         "Industry: **{industry}**\n\nSources:\n{sources}"),
     ])
 
     chain = prompt | llm | StrOutputParser()
