@@ -29,13 +29,15 @@ from langchain_core.output_parsers import StrOutputParser
 # CONFIGURATION
 # ──────────────────────────────────────────────────────────────
 APP_TITLE = "Market Research Assistant"
-APP_ICON = "📊"
+APP_ICON = ":material/query_stats:"
 LLM_OPTIONS = ["Gemini 2.5 Flash"]
 LLM_MODEL_MAP = {"Gemini 2.5 Flash": "gemini-2.5-flash"}
 DEFAULT_TEMPERATURE = 0.2          # Low temperature for factual output
-MAX_WIKI_RESULTS = 8               # Retrieve more, then filter to best 5
+MAX_WIKI_RESULTS = 6               # Results per search query
 FINAL_SOURCE_COUNT = 5             # Exactly 5 URLs returned to user
 MAX_REPORT_WORDS = 480             # Target word count (buffer under 500)
+HARD_WORD_LIMIT = 500              # Absolute maximum enforced programmatically
+WIKI_CONTENT_CHARS = 8000          # Characters per Wikipedia page (more context)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -57,8 +59,7 @@ def handle_api_error(e: Exception, context: str = "Operation") -> None:
         )
     elif "resource_exhausted" in error_msg or "429" in error_msg or "quota" in error_msg:
         st.warning(
-            "**Rate limit reached.** The free API tier has usage limits. "
-            "Please wait 1-2 minutes and try again."
+            "**Rate limit reached.** Please wait 1-2 minutes and try again."
         )
     else:
         st.error(f"{context} failed: {e}")
@@ -125,45 +126,83 @@ def validate_industry(llm: ChatGoogleGenerativeAI, user_input: str) -> dict:
     return result
 
 
-def retrieve_wikipedia_pages(industry: str) -> list[dict]:
-    """Retrieve relevant Wikipedia pages for the given industry.
+def generate_search_queries(llm: ChatGoogleGenerativeAI, industry: str) -> list[str]:
+    """Use the LLM to generate multiple diverse search queries for Wikipedia.
+
+    Design choice: A single search query (e.g. 'renewable energy') often
+    misses important sub-topics like market size, regulation, or key
+    companies. By generating 3 targeted queries, we cast a wider net
+    and retrieve more diverse, relevant pages for the final report.
+
+    This is a key retrieval improvement over naive single-query approaches.
+    """
+    prompt = ChatPromptTemplate.from_messages([
+        ("system",
+         "You are a research strategist. Given an industry, generate exactly "
+         "3 distinct Wikipedia search queries that together would provide "
+         "comprehensive coverage for a market research report.\n\n"
+         "The queries should target different aspects:\n"
+         "1. The industry itself (overview, definition)\n"
+         "2. The market or economics of the industry\n"
+         "3. Key technology, regulation, or major companies in the industry\n\n"
+         "Respond with ONLY the 3 queries, one per line. No numbering, "
+         "no explanation."),
+        ("human", "Industry: {industry}"),
+    ])
+
+    chain = prompt | llm | StrOutputParser()
+    response = chain.invoke({"industry": industry})
+
+    queries = [q.strip() for q in response.strip().split("\n") if q.strip()]
+    # Always include the original industry as a query too
+    if industry not in queries:
+        queries.insert(0, industry)
+    return queries[:4]  # Cap at 4 queries to control API usage
+
+
+def retrieve_wikipedia_pages(industry: str, queries: list[str]) -> list[dict]:
+    """Retrieve relevant Wikipedia pages using multiple search queries.
 
     Strategy:
-        1. Fetch up to MAX_WIKI_RESULTS pages via WikipediaRetriever
-        2. Each result includes title, content summary, and source URL
-        3. The caller (Step 2) then uses the LLM to rank and select
+        1. Run WikipediaRetriever for each generated query
+        2. Deduplicate results by page title
+        3. Collect content, title, and URL for each unique page
+        4. The caller (Step 2) then uses the LLM to rank and select
            the FINAL_SOURCE_COUNT most relevant pages
 
-    This two-stage approach (broad retrieval -> LLM-based filtering)
-    ensures high relevance and avoids returning tangential pages.
+    Using multiple queries (broad retrieval -> LLM-based filtering)
+    ensures high coverage and avoids missing important sub-topics.
     """
     retriever = WikipediaRetriever(
         top_k_results=MAX_WIKI_RESULTS,
-        doc_content_chars_max=4000,   # Enough context without overwhelming
+        doc_content_chars_max=WIKI_CONTENT_CHARS,
     )
-
-    docs = retriever.invoke(industry)
 
     pages = []
     seen_titles = set()
-    for doc in docs:
-        title = doc.metadata.get("title", "Unknown")
-        # Deduplicate by title
-        if title in seen_titles:
-            continue
-        seen_titles.add(title)
-        source = doc.metadata.get("source", "")
-        # Build URL if not provided directly
-        if not source:
-            source = (
-                "https://en.wikipedia.org/wiki/"
-                + title.replace(" ", "_")
-            )
-        pages.append({
-            "title": title,
-            "url": source,
-            "content": doc.page_content,
-        })
+
+    for query in queries:
+        try:
+            docs = retriever.invoke(query)
+        except Exception:
+            continue  # Skip failed queries, try remaining ones
+
+        for doc in docs:
+            title = doc.metadata.get("title", "Unknown")
+            if title in seen_titles:
+                continue
+            seen_titles.add(title)
+            source = doc.metadata.get("source", "")
+            if not source:
+                source = (
+                    "https://en.wikipedia.org/wiki/"
+                    + title.replace(" ", "_")
+                )
+            pages.append({
+                "title": title,
+                "url": source,
+                "content": doc.page_content,
+            })
 
     return pages
 
@@ -189,7 +228,7 @@ def select_top_pages(
     # Build a numbered list of candidates for the LLM to evaluate
     candidate_descriptions = ""
     for i, page in enumerate(pages):
-        snippet = page["content"][:500]
+        snippet = page["content"][:600]
         candidate_descriptions += (
             f"[{i}] Title: {page['title']}\n"
             f"    Snippet: {snippet}...\n\n"
@@ -207,6 +246,10 @@ def select_top_pages(
          "- Key companies and competitive landscape\n"
          "- Regulation, risks, and challenges\n"
          "- Technology and innovation in the sector\n\n"
+         "AVOID selecting pages about:\n"
+         "- Individual people or biographies\n"
+         "- Unrelated tangential topics\n"
+         "- Overly narrow sub-topics that don't inform the big picture\n\n"
          "Respond with ONLY the 5 index numbers, one per line, "
          "in order of relevance (most relevant first).\n"
          "Example response:\n3\n0\n7\n1\n5"),
@@ -222,30 +265,54 @@ def select_top_pages(
 
     # Parse indices from response
     selected = []
+    seen_indices = set()
     for line in response.strip().split("\n"):
         line = line.strip().strip("[]").strip()
         try:
             idx = int(line)
-            if 0 <= idx < len(pages) and idx not in [s["_idx"] for s in selected if "_idx" in s]:
-                page = pages[idx].copy()
-                page["_idx"] = idx
-                selected.append(page)
+            if 0 <= idx < len(pages) and idx not in seen_indices:
+                seen_indices.add(idx)
+                selected.append(pages[idx].copy())
         except ValueError:
             continue
 
     # Fallback: if parsing fails, return the first 5
     if len(selected) < FINAL_SOURCE_COUNT:
-        for page in pages:
-            if page not in selected:
+        for i, page in enumerate(pages):
+            if i not in seen_indices:
                 selected.append(page)
+                seen_indices.add(i)
             if len(selected) == FINAL_SOURCE_COUNT:
                 break
 
-    # Remove internal index key
-    for page in selected:
-        page.pop("_idx", None)
-
     return selected[:FINAL_SOURCE_COUNT]
+
+
+def enforce_word_limit(text: str, limit: int = HARD_WORD_LIMIT) -> str:
+    """Programmatically enforce the word limit on generated reports.
+
+    Design choice: LLMs are unreliable at counting words. Rather than
+    trusting the model, we truncate at the sentence boundary nearest
+    to the limit. This guarantees compliance with the <500 word
+    requirement regardless of LLM behaviour.
+    """
+    words = text.split()
+    if len(words) <= limit:
+        return text
+
+    # Truncate to limit, then find the last sentence boundary
+    truncated = " ".join(words[:limit])
+    last_period = truncated.rfind(".")
+    if last_period > len(truncated) * 0.5:  # Only cut at sentence if reasonable
+        truncated = truncated[:last_period + 1]
+
+    return truncated
+
+
+def count_words(text: str) -> int:
+    """Count words in text, excluding markdown formatting symbols."""
+    clean = text.replace("**", "").replace("*", "").replace("#", "")
+    return len(clean.split())
 
 
 def generate_report(
@@ -257,14 +324,19 @@ def generate_report(
 
     The prompt is carefully engineered to produce analyst-grade output:
     - Structured sections (overview, drivers, risks, outlook)
+    - Inline citations referencing specific Wikipedia source titles
     - Evidence-based language ('According to...', 'Data suggests...')
     - Synthesis across sources (not copy-paste from one page)
-    - Hard word limit enforced in the prompt
+    - Hard word limit enforced both in prompt and programmatically
 
     Design choice: we pass the full content of all 5 pages to give
     the LLM maximum context for synthesis. The temperature is kept
     low (0.2) to minimise hallucination beyond source material.
     """
+    # Build source titles list for citation instructions
+    source_titles = [page["title"] for page in pages]
+    titles_str = ", ".join(f'"{t}"' for t in source_titles)
+
     # Combine source material with clear attribution
     source_material = ""
     for i, page in enumerate(pages, 1):
@@ -281,21 +353,29 @@ def generate_report(
          "Wikipedia sources. Do NOT invent facts beyond what the sources "
          "contain.\n\n"
          "REPORT REQUIREMENTS:\n"
-         "1. STRICTLY under {max_words} words (this is a hard limit)\n"
-         "2. Use this structure:\n"
-         "   **Industry Overview** - definition, scope, and market structure\n"
-         "   **Key Drivers & Trends** - growth factors, technology shifts\n"
-         "   **Competitive Landscape** - major players, market concentration\n"
-         "   **Risks & Challenges** - regulatory, economic, operational\n"
-         "   **Outlook** - future direction based on available evidence\n"
-         "3. Use evidence language: 'According to [Source]...', "
-         "'Data from [Source] suggests...'\n"
-         "4. Synthesise across multiple sources — do not summarise "
-         "each source separately\n"
+         "1. STRICTLY under {max_words} words — this is a HARD limit. "
+         "Aim for 400-470 words.\n"
+         "2. Use this structure with markdown headings:\n"
+         "   ## Industry Overview\n"
+         "   Definition, scope, market structure, and size.\n"
+         "   ## Key Drivers & Trends\n"
+         "   Growth factors, technology shifts, demand dynamics.\n"
+         "   ## Competitive Landscape\n"
+         "   Major players, market concentration, competitive dynamics.\n"
+         "   ## Risks & Challenges\n"
+         "   Regulatory, economic, operational, and emerging threats.\n"
+         "   ## Outlook\n"
+         "   Future direction based on available evidence.\n\n"
+         "3. CITE your sources inline using the Wikipedia page titles. "
+         "Available sources: {source_titles}. "
+         "Use phrases like: 'According to the Wikipedia article on [Title]...', "
+         "'Data from [Title] suggests...', 'As noted in [Title]...'\n"
+         "4. SYNTHESISE across multiple sources in each section. Do NOT "
+         "summarise each source separately.\n"
          "5. Write in a professional, analytical tone suitable for "
-         "a business audience\n"
-         "6. End with exactly one line: 'Word count: [N]' where N is "
-         "the actual word count of the report above"),
+         "a business audience. Compare trends, highlight key drivers, "
+         "identify risks, and discuss market structure.\n"
+         "6. Do NOT include a word count line at the end."),
         ("human",
          "Write an industry report on: **{industry}**\n\n"
          "Sources:\n{sources}"),
@@ -306,7 +386,20 @@ def generate_report(
         "industry": industry,
         "sources": source_material,
         "max_words": MAX_REPORT_WORDS,
+        "source_titles": titles_str,
     })
+
+    # Remove any "Word count:" line the LLM might add
+    lines = report.strip().split("\n")
+    cleaned_lines = [
+        line for line in lines
+        if not line.strip().lower().startswith("word count")
+        and not line.strip().lower().startswith("*word count")
+    ]
+    report = "\n".join(cleaned_lines).strip()
+
+    # Programmatic word limit enforcement
+    report = enforce_word_limit(report, HARD_WORD_LIMIT)
 
     return report
 
@@ -327,6 +420,7 @@ def init_session_state():
         "validated_industry": "",
         "wiki_pages": [],
         "report": "",
+        "search_queries": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -343,6 +437,7 @@ def reset_pipeline():
     st.session_state.validated_industry = ""
     st.session_state.wiki_pages = []
     st.session_state.report = ""
+    st.session_state.search_queries = []
 
 
 # ──────────────────────────────────────────────────────────────
@@ -359,7 +454,7 @@ def render_sidebar() -> tuple[str, str]:
     only in session state. It is never written to disk or logged.
     """
     with st.sidebar:
-        st.header("🔧 Configuration")
+        st.markdown("### Configuration")
 
         selected_model = st.selectbox(
             "Select LLM",
@@ -377,26 +472,31 @@ def render_sidebar() -> tuple[str, str]:
 
         st.divider()
         st.caption(
-            "💡 Get a free API key from "
+            "Get a free API key from "
             "[Google AI Studio](https://aistudio.google.com/apikey)"
         )
 
-        # Display pipeline status
+        # Display pipeline progress
         st.divider()
-        st.subheader("Pipeline Status")
+        st.markdown("### Pipeline Status")
         step = st.session_state.get("current_step", 1)
-        steps = [
-            ("1️⃣", "Industry Input", step >= 2),
-            ("2️⃣", "Source Retrieval", step >= 3),
-            ("3️⃣", "Report Generation", step >= 4),
+
+        # Progress bar
+        progress_map = {1: 0.0, 2: 0.33, 3: 0.66, 4: 1.0}
+        st.progress(progress_map.get(step, 0.0))
+
+        steps_info = [
+            ("Industry Input", step >= 2),
+            ("Source Retrieval", step >= 3),
+            ("Report Generation", step >= 4),
         ]
-        for icon, label, done in steps:
+        for i, (label, done) in enumerate(steps_info, 1):
             if done:
-                st.markdown(f"{icon} ~~{label}~~ ✅")
-            elif step == steps.index((icon, label, done)) + 1:
-                st.markdown(f"{icon} **{label}** ⏳")
+                st.markdown(f"~~Step {i}: {label}~~ :green[Done]")
+            elif step == i:
+                st.markdown(f"**Step {i}: {label}** :orange[In progress]")
             else:
-                st.markdown(f"{icon} {label}")
+                st.markdown(f"Step {i}: {label}")
 
     return selected_model, api_key
 
@@ -409,7 +509,7 @@ def render_step_1(llm: ChatGoogleGenerativeAI):
         "The assistant will validate your input before proceeding."
     )
 
-    # Text input with callback to reset if changed
+    # Text input
     industry = st.text_input(
         "Industry name",
         placeholder="e.g. Renewable Energy, Semiconductor Manufacturing, Fintech",
@@ -433,21 +533,22 @@ def render_step_1(llm: ChatGoogleGenerativeAI):
             st.session_state.validated_industry = normalised
             st.session_state.current_step = 2
             st.success(
-                f"✅ Recognised industry: **{normalised}**"
+                f"Recognised industry: **{normalised}**"
             )
             if result["reason"]:
-                st.caption(f"ℹ️ {result['reason']}")
+                st.caption(result["reason"])
             st.rerun()
         else:
             st.warning(
-                "⚠️ That doesn't appear to be a recognised industry. "
-                "Please try again with a specific industry name."
+                "That doesn't appear to be a recognised industry. "
+                "Please try again with a specific industry name "
+                "(e.g. 'Renewable Energy' rather than 'energy')."
             )
             if result["reason"]:
-                st.caption(f"ℹ️ {result['reason']}")
+                st.caption(result["reason"])
 
     elif not industry:
-        st.info("👆 Please enter an industry name above to get started.")
+        st.info("Enter an industry name above to get started.")
 
 
 def render_step_2(llm: ChatGoogleGenerativeAI):
@@ -455,13 +556,16 @@ def render_step_2(llm: ChatGoogleGenerativeAI):
     industry = st.session_state.validated_industry
 
     st.header("Step 2: Relevant Wikipedia Sources")
-    st.markdown(f"Retrieving sources for: **{industry}**")
 
     if not st.session_state.wiki_pages:
-        with st.spinner("Searching Wikipedia and ranking by relevance..."):
+        with st.spinner("Generating search queries and retrieving sources..."):
             try:
-                # Stage A: Broad retrieval
-                raw_pages = retrieve_wikipedia_pages(industry)
+                # Stage A: Generate multiple search queries
+                queries = generate_search_queries(llm, industry)
+                st.session_state.search_queries = queries
+
+                # Stage B: Broad retrieval across all queries
+                raw_pages = retrieve_wikipedia_pages(industry, queries)
 
                 if not raw_pages:
                     st.error(
@@ -470,13 +574,24 @@ def render_step_2(llm: ChatGoogleGenerativeAI):
                     )
                     return
 
-                # Stage B: LLM-based relevance filtering
+                # Stage C: LLM-based relevance filtering
                 top_pages = select_top_pages(llm, industry, raw_pages)
                 st.session_state.wiki_pages = top_pages
 
             except Exception as e:
                 handle_api_error(e, "Retrieval")
                 return
+
+    # Show search strategy
+    if st.session_state.search_queries:
+        with st.expander("Search strategy", expanded=False):
+            st.markdown("Queries used to find sources:")
+            for q in st.session_state.search_queries:
+                st.markdown(f"- *{q}*")
+            st.caption(
+                f"Retrieved {len(st.session_state.wiki_pages)} most relevant "
+                f"pages from initial candidate pool."
+            )
 
     # Display the 5 selected sources
     pages = st.session_state.wiki_pages
@@ -487,7 +602,7 @@ def render_step_2(llm: ChatGoogleGenerativeAI):
 
     st.divider()
 
-    if st.button("Generate Industry Report →", type="primary"):
+    if st.button("Generate Industry Report", type="primary"):
         st.session_state.current_step = 3
         st.rerun()
 
@@ -500,7 +615,7 @@ def render_step_3(llm: ChatGoogleGenerativeAI):
     st.header("Step 3: Industry Report")
 
     if not st.session_state.report:
-        with st.spinner("Generating your industry report... (this may take a moment)"):
+        with st.spinner("Generating your industry report..."):
             try:
                 report = generate_report(llm, industry, pages)
                 st.session_state.report = report
@@ -509,20 +624,47 @@ def render_step_3(llm: ChatGoogleGenerativeAI):
                 handle_api_error(e, "Report generation")
                 return
 
-    # Display the report
+    # Display the report in a clean container
     st.markdown(st.session_state.report)
 
-    # Show the sources used
+    # Word count badge
+    wc = count_words(st.session_state.report)
+    if wc <= HARD_WORD_LIMIT:
+        st.caption(f"Word count: {wc} / {HARD_WORD_LIMIT}")
+    else:
+        st.caption(f":red[Word count: {wc} / {HARD_WORD_LIMIT} — over limit]")
+
+    # Sources section
     st.divider()
     st.subheader("Sources")
     for i, page in enumerate(st.session_state.wiki_pages, 1):
         st.markdown(f"{i}. [{page['title']}]({page['url']})")
 
-    # Option to start over
+    # Actions
     st.divider()
-    if st.button("🔄 Research a different industry"):
-        reset_pipeline()
-        st.rerun()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Research a different industry"):
+            reset_pipeline()
+            st.rerun()
+    with col2:
+        # Download report as text file
+        report_text = (
+            f"INDUSTRY REPORT: {industry}\n"
+            f"{'=' * 50}\n\n"
+            f"{st.session_state.report}\n\n"
+            f"{'=' * 50}\n"
+            f"SOURCES:\n"
+        )
+        for i, page in enumerate(st.session_state.wiki_pages, 1):
+            report_text += f"{i}. {page['title']} - {page['url']}\n"
+
+        st.download_button(
+            label="Download report",
+            data=report_text,
+            file_name=f"{industry.lower().replace(' ', '_')}_report.txt",
+            mime="text/plain",
+        )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -534,8 +676,8 @@ def main():
 
     Orchestrates the three-step pipeline:
         1. Industry validation
-        2. Wikipedia retrieval
-        3. Report generation
+        2. Wikipedia retrieval (multi-query + LLM ranking)
+        3. Report generation with inline citations
 
     Each step only renders when its prerequisites are met,
     creating a clear, guided user experience.
@@ -548,35 +690,39 @@ def main():
 
     init_session_state()
 
-    st.title(f"{APP_ICON} {APP_TITLE}")
-    st.caption("AI-powered industry research from Wikipedia sources")
+    # Header
+    st.title(APP_TITLE)
+    st.caption(
+        "AI-powered industry analysis from Wikipedia sources  |  "
+        "Built with LangChain + Gemini"
+    )
 
-    # Sidebar — LLM configuration
+    # Sidebar
     selected_model, api_key = render_sidebar()
 
-    # Gate: require API key before proceeding
+    # Gate: require API key
     if not api_key:
         st.info(
-            "👈 Please enter your API key in the sidebar to begin. "
-            "You can get a free key from "
+            "Enter your Google AI API key in the sidebar to begin.  \n"
+            "Get a free key from "
             "[Google AI Studio](https://aistudio.google.com/apikey)."
         )
         return
 
-    # Initialise the LLM
+    # Initialise LLM
     llm = initialise_llm(selected_model, api_key)
 
-    # Render the current step
+    # Render pipeline steps
     step = st.session_state.current_step
 
     if step == 1:
         render_step_1(llm)
     elif step == 2:
-        render_step_1(llm)     # Keep input visible
+        render_step_1(llm)
         st.divider()
         render_step_2(llm)
     elif step >= 3:
-        render_step_1(llm)     # Keep input visible
+        render_step_1(llm)
         st.divider()
         render_step_2(llm)
         st.divider()
