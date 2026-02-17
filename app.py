@@ -18,11 +18,14 @@ Design Principles:
     - KISS: minimal complexity, maximum clarity
 """
 
+import io
+import re
 import streamlit as st
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.retrievers import WikipediaRetriever
 from langchain_core.output_parsers import StrOutputParser
+from fpdf import FPDF
 
 
 # ──────────────────────────────────────────────────────────────
@@ -638,11 +641,13 @@ def render_step_2(llm: ChatGoogleGenerativeAI):
         st.rerun()
 
 
-def fetch_industry_image(industry: str) -> str | None:
+def fetch_industry_image(industry: str, page_titles: list[str] | None = None) -> str | None:
     """Attempt to fetch a relevant thumbnail image URL from Wikipedia.
 
-    Uses the Wikipedia API to find a page image for the industry.
-    Returns the image URL if found, None otherwise.
+    Strategy:
+        1. First try the industry name directly
+        2. If that fails, try each retrieved Wikipedia page title
+        3. Returns the first image URL found, or None
 
     Design choice: visual elements make the report feel more
     professional and are rewarded in the marking rubric under
@@ -652,27 +657,293 @@ def fetch_industry_image(industry: str) -> str | None:
     import urllib.parse
     import requests
 
-    try:
-        search_url = (
-            "https://en.wikipedia.org/w/api.php?"
-            "action=query&format=json&prop=pageimages&piprop=original"
-            f"&titles={urllib.parse.quote(industry)}"
-            "&redirects=1"
-        )
-        resp = requests.get(search_url, timeout=5)
-        data = resp.json()
-        pages = data.get("query", {}).get("pages", {})
-        for page in pages.values():
-            img = page.get("original", {}).get("source")
-            if img:
-                return img
-    except Exception:
-        pass
+    # Build a list of titles to try, starting with the industry name
+    titles_to_try = [industry]
+    if page_titles:
+        titles_to_try.extend(page_titles)
+
+    for title in titles_to_try:
+        try:
+            search_url = (
+                "https://en.wikipedia.org/w/api.php?"
+                "action=query&format=json&prop=pageimages&piprop=original"
+                f"&titles={urllib.parse.quote(title)}"
+                "&redirects=1"
+            )
+            resp = requests.get(search_url, timeout=5)
+            data = resp.json()
+            api_pages = data.get("query", {}).get("pages", {})
+            for page in api_pages.values():
+                img = page.get("original", {}).get("source")
+                if img:
+                    # Skip SVG files (often logos/icons that don't render well)
+                    if not img.lower().endswith(".svg"):
+                        return img
+        except Exception:
+            continue
     return None
 
 
+def parse_markdown_table(text: str) -> list[list[str]] | None:
+    """Extract a markdown table from text and return as list of rows.
+
+    Each row is a list of cell strings. Returns None if no valid table
+    is found. This allows us to render tables using st.dataframe()
+    instead of relying on Streamlit's patchy markdown table support.
+    """
+    lines = text.strip().split("\n")
+    table_lines = []
+    in_table = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            in_table = True
+            table_lines.append(stripped)
+        elif in_table:
+            break  # Table ended
+
+    if len(table_lines) < 2:
+        return None
+
+    rows = []
+    for i, line in enumerate(table_lines):
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        # Skip separator rows (e.g. |---|---|)
+        if all(set(c.strip()) <= set("-: ") for c in cells):
+            continue
+        rows.append(cells)
+
+    return rows if len(rows) >= 2 else None
+
+
+def render_report_section(heading: str, body: str):
+    """Render a single report section with proper heading and body.
+
+    Handles markdown tables specially: extracts them and renders
+    via st.dataframe() for reliable display. All other content
+    is rendered as standard markdown.
+    """
+    import pandas as pd
+
+    st.markdown(f"**{heading}**")
+
+    if not body:
+        return
+
+    # Check if this section contains a markdown table
+    table_data = parse_markdown_table(body)
+    if table_data:
+        # Render text before the table
+        table_start = body.find("|")
+        pre_table = body[:table_start].strip() if table_start > 0 else ""
+        if pre_table:
+            st.markdown(pre_table)
+
+        # Render the table using st.dataframe
+        headers = table_data[0]
+        data_rows = table_data[1:]
+        df = pd.DataFrame(data_rows, columns=headers)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # Render text after the table
+        lines = body.split("\n")
+        after_table = False
+        post_lines = []
+        last_pipe_found = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("|") and stripped.endswith("|"):
+                last_pipe_found = True
+                continue
+            if last_pipe_found and not stripped.startswith("|"):
+                after_table = True
+            if after_table:
+                post_lines.append(line)
+
+        post_table = "\n".join(post_lines).strip()
+        if post_table:
+            st.markdown(post_table)
+    else:
+        st.markdown(body)
+
+
+def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
+    """Generate a professionally formatted PDF of the industry report.
+
+    Creates a clean PDF with:
+        - Title page header with industry name
+        - Section headings in bold
+        - Body text with proper line spacing
+        - Tables formatted with borders and alignment
+        - Numbered references section at the end
+
+    Design choice: PDF output gives the user a portable, presentation-
+    ready document suitable for sharing with stakeholders. fpdf2 was
+    chosen over reportlab for its smaller footprint and simpler API.
+    """
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.add_page()
+
+    # ── Title ──
+    pdf.set_font("Helvetica", "B", 22)
+    pdf.set_text_color(30, 30, 30)
+    pdf.cell(0, 14, txt=industry, new_x="LMARGIN", new_y="NEXT", align="C")
+
+    pdf.set_font("Helvetica", "", 11)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(
+        0, 8,
+        txt="Market Intelligence Report",
+        new_x="LMARGIN", new_y="NEXT", align="C",
+    )
+
+    # Divider line
+    pdf.ln(4)
+    pdf.set_draw_color(200, 200, 200)
+    pdf.line(20, pdf.get_y(), 190, pdf.get_y())
+    pdf.ln(6)
+
+    # ── Parse and render report sections ──
+    sections = report.split("## ")
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+
+        lines = section.split("\n", 1)
+        heading = lines[0].strip().replace("**", "")
+        body = lines[1].strip() if len(lines) > 1 else ""
+
+        # Section heading
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.set_text_color(30, 80, 160)
+        pdf.cell(0, 10, txt=heading, new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(1)
+
+        if not body:
+            continue
+
+        # Check for table in body
+        table_data = parse_markdown_table(body)
+        if table_data:
+            # Render text before table
+            table_start = body.find("|")
+            pre_table = body[:table_start].strip() if table_start > 0 else ""
+            if pre_table:
+                pdf.set_font("Helvetica", "", 10)
+                pdf.set_text_color(40, 40, 40)
+                clean_text = pre_table.replace("**", "")
+                pdf.multi_cell(0, 6, txt=clean_text)
+                pdf.ln(2)
+
+            # Render table
+            headers = table_data[0]
+            data_rows = table_data[1:]
+            num_cols = len(headers)
+            usable_width = 170  # Page width minus margins
+            col_width = usable_width / num_cols
+
+            # Table header
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_fill_color(30, 80, 160)
+            pdf.set_text_color(255, 255, 255)
+            for header in headers:
+                pdf.cell(col_width, 7, txt=header[:30], border=1, fill=True, align="C")
+            pdf.ln()
+
+            # Table data rows
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(40, 40, 40)
+            for row_idx, row in enumerate(data_rows):
+                if row_idx % 2 == 0:
+                    pdf.set_fill_color(245, 245, 245)
+                else:
+                    pdf.set_fill_color(255, 255, 255)
+                for i, cell in enumerate(row):
+                    cell_text = cell[:30] if i < num_cols else ""
+                    pdf.cell(
+                        col_width, 7, txt=cell_text,
+                        border=1, fill=True, align="C",
+                    )
+                pdf.ln()
+
+            pdf.ln(3)
+
+            # Render text after table
+            after_lines = body.split("\n")
+            after_table = False
+            post_lines = []
+            last_pipe_found = False
+            for line in after_lines:
+                stripped = line.strip()
+                if stripped.startswith("|") and stripped.endswith("|"):
+                    last_pipe_found = True
+                    continue
+                if last_pipe_found and not stripped.startswith("|"):
+                    after_table = True
+                if after_table:
+                    post_lines.append(line)
+            post_text = "\n".join(post_lines).strip()
+            if post_text:
+                pdf.set_font("Helvetica", "", 10)
+                pdf.set_text_color(40, 40, 40)
+                clean_text = post_text.replace("**", "")
+                pdf.multi_cell(0, 6, txt=clean_text)
+                pdf.ln(2)
+        else:
+            # Regular text section
+            pdf.set_font("Helvetica", "", 10)
+            pdf.set_text_color(40, 40, 40)
+            clean_body = body.replace("**", "")
+            pdf.multi_cell(0, 6, txt=clean_body)
+            pdf.ln(3)
+
+    # ── References section ──
+    pdf.ln(4)
+    pdf.set_draw_color(200, 200, 200)
+    pdf.line(20, pdf.get_y(), 190, pdf.get_y())
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.set_text_color(30, 80, 160)
+    pdf.cell(0, 10, txt="References", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(40, 40, 40)
+    for i, page in enumerate(pages, 1):
+        ref_text = f"[{i}] {page['title']} - {page['url']}"
+        pdf.multi_cell(0, 5, txt=ref_text)
+        pdf.ln(1)
+
+    # Footer note
+    pdf.ln(6)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(150, 150, 150)
+    pdf.cell(
+        0, 5,
+        txt="Generated by Market Research Assistant | Data sourced from Wikipedia",
+        new_x="LMARGIN", new_y="NEXT", align="C",
+    )
+
+    # Output to bytes
+    pdf_bytes = pdf.output()
+    return bytes(pdf_bytes)
+
+
 def render_step_3(llm: ChatGoogleGenerativeAI):
-    """Step 3: Generate and display the industry report."""
+    """Step 3: Generate and display the industry report.
+
+    Rendering strategy:
+        - Split report by '## ' headings into discrete sections
+        - Render each heading as bold text via st.markdown
+        - Detect markdown tables and render via st.dataframe for
+          reliable display (Streamlit's markdown renderer handles
+          pipe tables inconsistently)
+        - Provide PDF download with formatted references
+    """
     industry = st.session_state.validated_industry
     pages = st.session_state.wiki_pages
 
@@ -691,22 +962,22 @@ def render_step_3(llm: ChatGoogleGenerativeAI):
     report = st.session_state.report
 
     # ── Report header with optional industry image ──
-    img_url = fetch_industry_image(industry)
+    page_titles = [p["title"] for p in pages]
+    img_url = fetch_industry_image(industry, page_titles)
     if img_url:
         col_img, col_title = st.columns([1, 3])
         with col_img:
             st.image(img_url, use_container_width=True)
         with col_title:
-            st.subheader(f"{industry}")
+            st.subheader(industry)
             st.caption("Market Intelligence Report")
     else:
-        st.subheader(f"{industry}")
+        st.subheader(industry)
         st.caption("Market Intelligence Report")
 
     st.divider()
 
     # ── Render the report section by section ──
-    # Split by ## headings and render each as its own block
     sections = report.split("## ")
     for section in sections:
         section = section.strip()
@@ -718,10 +989,7 @@ def render_step_3(llm: ChatGoogleGenerativeAI):
         heading = lines[0].strip()
         body = lines[1].strip() if len(lines) > 1 else ""
 
-        # Render heading and body
-        st.markdown(f"### {heading}")
-        if body:
-            st.markdown(body)
+        render_report_section(heading, body)
         st.markdown("")  # Spacing
 
     # ── Word count badge ──
@@ -733,7 +1001,7 @@ def render_step_3(llm: ChatGoogleGenerativeAI):
 
     # ── Sources section ──
     st.divider()
-    st.markdown("### Sources")
+    st.markdown("**Sources**")
     for i, page in enumerate(st.session_state.wiki_pages, 1):
         st.markdown(f"{i}. [{page['title']}]({page['url']})")
 
@@ -745,22 +1013,13 @@ def render_step_3(llm: ChatGoogleGenerativeAI):
             reset_pipeline()
             st.rerun()
     with col2:
-        # Download report as text file
-        report_text = (
-            f"INDUSTRY REPORT: {industry}\n"
-            f"{'=' * 50}\n\n"
-            f"{report}\n\n"
-            f"{'=' * 50}\n"
-            f"SOURCES:\n"
-        )
-        for i, page in enumerate(st.session_state.wiki_pages, 1):
-            report_text += f"{i}. {page['title']} - {page['url']}\n"
-
+        # Generate PDF download
+        pdf_bytes = generate_pdf(industry, report, pages)
         st.download_button(
-            label="Download report",
-            data=report_text,
-            file_name=f"{industry.lower().replace(' ', '_')}_report.txt",
-            mime="text/plain",
+            label="Download PDF report",
+            data=pdf_bytes,
+            file_name=f"{industry.lower().replace(' ', '_')}_report.pdf",
+            mime="application/pdf",
         )
 
 
