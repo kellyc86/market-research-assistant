@@ -318,64 +318,77 @@ def count_words(text: str) -> int:
     return len(clean.split())
 
 
-def normalise_report_formatting(report: str) -> str:
-    """Post-process LLM output to guarantee clean markdown structure.
+HEADING_LABELS = [
+    "Executive Summary",
+    "Industry Overview",
+    "Market Structure & Competitive Dynamics",
+    "Growth Drivers",
+    "Risks & Constraints",
+    "Key Data",
+    "Strategic Interpretation",
+    "Final Takeaway",
+]
 
-    Problem: LLMs inconsistently format headings — sometimes with
-    '##' markers, sometimes without, sometimes with body text on
-    the same line. This breaks all downstream rendering.
 
-    Solution: Search for each known heading label (with or without
-    '##' prefix) and enforce a consistent format:
-        \\n\\n## Heading Label\\n
-    followed by the body text on the next line.
+def split_report_into_sections(report: str) -> list[tuple[str, str]]:
+    """Split a report into (heading, body) tuples using known heading labels.
 
-    This function is idempotent — running it twice produces the
-    same result.
+    This is the ONLY function that parses report structure. It works
+    regardless of how the LLM formats headings — with or without ##,
+    with or without ** bold markers, on the same line as body text or
+    on a separate line. It searches for exact heading label strings
+    and uses their positions to extract body text.
+
+    Returns:
+        List of (heading_label, body_text) tuples in order.
+        If no headings are found, returns a single tuple with
+        an empty heading and the full report as body.
+
+    Design choice: earlier attempts used regex on '## ' markers or
+    relied on the LLM to format correctly. Both failed because LLMs
+    are inconsistent. This approach is format-agnostic — it only
+    looks for the literal heading text strings.
     """
-    # Define the exact heading labels used in the prompt
-    heading_labels = [
-        "Executive Summary",
-        "Industry Overview",
-        "Market Structure & Competitive Dynamics",
-        "Growth Drivers",
-        "Risks & Constraints",
-        "Key Data",
-        "Strategic Interpretation",
-        "Final Takeaway",
-    ]
+    # Build a regex that matches any heading label with optional prefixes
+    # This handles: "## Executive Summary", "**Executive Summary**",
+    # "Executive Summary", "### Executive Summary:", etc.
+    heading_positions = []
 
-    for label in heading_labels:
-        # Match the heading label with optional ## prefix, optional ** bold,
-        # optional whitespace, and capture any body text on the same line.
-        # This handles all variants:
-        #   "## Executive Summary The text..."
-        #   "**Executive Summary** The text..."
-        #   "Executive Summary The text..."
-        #   "## Executive Summary\nThe text..."  (already correct)
+    for label in HEADING_LABELS:
+        # Match optional ##, optional **, the label, optional **, optional :
         pattern = (
-            r"(?:\n|\A)\s*"           # Start of line
-            r"(?:\#{1,3}\s*)?"        # Optional ## markers
-            r"(?:\*\*\s*)?"           # Optional opening **
-            rf"({re.escape(label)})"  # The heading label itself
-            r"(?:\s*\*\*)?"           # Optional closing **
-            r"[:\s]*"                 # Optional colon or spaces
-            r"(?:\n|(.+))"           # Newline (good) OR body text on same line (bad)
+            r"(?:^|\n)\s*"
+            r"(?:\#{1,3}\s*)?"
+            r"(?:\*\*\s*)?"
+            + re.escape(label)
+            + r"(?:\s*\*\*)?"
+            r"\s*:?\s*"
         )
+        match = re.search(pattern, report)
+        if match:
+            heading_positions.append((match.start(), match.end(), label))
 
-        def _heading_replacer(m, lbl=label):
-            body_on_same_line = m.group(2)
-            if body_on_same_line:
-                return f"\n\n## {lbl}\n{body_on_same_line.strip()}"
-            else:
-                return f"\n\n## {lbl}\n"
+    # Sort by position in the report
+    heading_positions.sort(key=lambda x: x[0])
 
-        report = re.sub(pattern, _heading_replacer, report)
+    if not heading_positions:
+        # No headings found — return entire report as one section
+        return [("Report", report.strip())]
 
-    # Clean up any excessive blank lines (more than 2 consecutive)
-    report = re.sub(r"\n{3,}", "\n\n", report)
+    sections = []
+    for i, (start, end, label) in enumerate(heading_positions):
+        # Body extends from end of this heading to start of next heading
+        if i + 1 < len(heading_positions):
+            body = report[end:heading_positions[i + 1][0]]
+        else:
+            body = report[end:]
 
-    return report.strip()
+        # Clean up the body text
+        body = body.strip()
+
+        sections.append((label, body))
+
+    return sections
 
 
 def generate_report(
@@ -503,9 +516,6 @@ def generate_report(
         and not line.strip().lower().startswith("*word count")
     ]
     report = "\n".join(cleaned_lines).strip()
-
-    # Normalise formatting: force newlines after headings, fix tables
-    report = normalise_report_formatting(report)
 
     # Programmatic word limit enforcement
     report = enforce_word_limit(report, HARD_WORD_LIMIT)
@@ -943,15 +953,8 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
     pdf.ln(6)
 
     # ── Parse and render report sections ──
-    sections = report.split("## ")
-    for section in sections:
-        section = section.strip()
-        if not section:
-            continue
-
-        lines = section.split("\n", 1)
-        heading = lines[0].strip().strip("#").strip("*").strip()
-        body = lines[1].strip() if len(lines) > 1 else ""
+    sections = split_report_into_sections(report)
+    for heading, body in sections:
 
         # Section heading
         pdf.set_font("Helvetica", "B", 13)
@@ -1100,17 +1103,9 @@ def render_step_3(llm: ChatGoogleGenerativeAI):
     st.divider()
 
     # ── Render the report section by section ──
-    sections = report.split("## ")
-    for section in sections:
-        section = section.strip()
-        if not section:
-            continue
-
-        # Split heading from body
-        lines = section.split("\n", 1)
-        heading = lines[0].strip()
-        body = lines[1].strip() if len(lines) > 1 else ""
-
+    # Use heading-label-based splitting (format-agnostic)
+    sections = split_report_into_sections(report)
+    for heading, body in sections:
         render_report_section(heading, body)
         st.markdown("")  # Spacing
 
