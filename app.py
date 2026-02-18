@@ -355,14 +355,16 @@ def split_report_into_sections(report: str) -> list[tuple[str, str]]:
     heading_positions = []
 
     for label in HEADING_LABELS:
-        # Match optional ##, optional **, the label, optional **, optional :
+        # Match the heading label anywhere in text, with optional
+        # ## prefix, ** bold markers, etc. We use a broad pattern
+        # because the LLM may place headings mid-sentence, after
+        # periods, or on new lines — all must be caught.
         pattern = (
-            r"(?:^|\n)\s*"
-            r"(?:\#{1,3}\s*)?"
-            r"(?:\*\*\s*)?"
-            + re.escape(label)
-            + r"(?:\s*\*\*)?"
-            r"\s*:?\s*"
+            r"(?:\#{1,3}\s*)?"        # Optional ## markers
+            r"(?:\*\*\s*)?"           # Optional opening **
+            + re.escape(label)        # The heading label itself
+            + r"(?:\s*\*\*)?"         # Optional closing **
+            r"\s*:?\s*"              # Optional colon and whitespace
         )
         match = re.search(pattern, report)
         if match:
