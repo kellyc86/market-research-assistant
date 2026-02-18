@@ -318,6 +318,51 @@ def count_words(text: str) -> int:
     return len(clean.split())
 
 
+def normalise_report_formatting(report: str) -> str:
+    """Post-process LLM output to guarantee clean markdown structure.
+
+    Problem: LLMs sometimes generate '## Heading Body text...' on a
+    single line instead of placing a newline between the heading and
+    the body paragraph. This breaks every downstream parser (both
+    the Streamlit section renderer and the PDF generator) because
+    they split on '\\n' to separate heading from body.
+
+    Solution: Use regex to insert a newline after each known heading.
+    Also ensures blank lines between sections and normalises the
+    markdown table format (newlines around pipe rows).
+
+    This function is idempotent — running it twice produces the
+    same result.
+    """
+    # Define the exact heading labels used in the prompt
+    heading_labels = [
+        "Executive Summary",
+        "Industry Overview",
+        "Market Structure & Competitive Dynamics",
+        "Growth Drivers",
+        "Risks & Constraints",
+        "Key Data",
+        "Strategic Interpretation",
+        "Final Takeaway",
+    ]
+
+    # Force a newline after each ## Heading if the body follows on the same line
+    for label in heading_labels:
+        # Match '## Label' followed by text on the same line (no newline)
+        pattern = rf"(##\s*{re.escape(label)})\s*(?!\n)(.+)"
+        replacement = rf"\1\n\2"
+        report = re.sub(pattern, replacement, report)
+
+    # Ensure a blank line before every ## heading (markdown requires this)
+    report = re.sub(r"([^\n])\n(## )", r"\1\n\n\2", report)
+
+    # Ensure newlines around markdown table rows so they parse correctly
+    # Find pipe-delimited lines and ensure they have their own lines
+    report = re.sub(r"([^\n])(\n?\|)", r"\1\n|", report)
+
+    return report.strip()
+
+
 def generate_report(
     llm: ChatGoogleGenerativeAI,
     industry: str,
@@ -368,7 +413,15 @@ def generate_report(
          "Maximum: {max_words} words. Target range: 430-480 words.\n"
          "If output exceeds {max_words} words, rewrite more concisely.\n\n"
          "================================ MANDATORY STRUCTURE\n"
-         "Use markdown headings (##) and this exact order:\n\n"
+         "Use markdown headings (##) followed by a NEWLINE, then the "
+         "section body on the NEXT line. Never put heading and body "
+         "text on the same line.\n\n"
+         "CORRECT format example:\n"
+         "## Executive Summary\n"
+         "The industry is growing rapidly...\n\n"
+         "WRONG format (do NOT do this):\n"
+         "## Executive Summary The industry is growing rapidly...\n\n"
+         "Use this exact section order:\n\n"
          "## Executive Summary\n"
          "Key insight, strategic implication, and recommendation in "
          "2-3 sentences.\n\n"
@@ -384,6 +437,10 @@ def generate_report(
          "## Key Data\n"
          "Include a compact markdown table summarising the most "
          "decision-relevant quantitative figures found in the sources. "
+         "The table MUST have each row on its own line. Example:\n"
+         "| Metric | Value | Source |\n"
+         "| --- | --- | --- |\n"
+         "| Revenue | $50B | Page title |\n\n"
          "If no quantitative data is available, state this explicitly.\n\n"
          "## Strategic Interpretation\n"
          "Explain what the findings mean for decision-makers. Do not "
@@ -431,6 +488,9 @@ def generate_report(
         and not line.strip().lower().startswith("*word count")
     ]
     report = "\n".join(cleaned_lines).strip()
+
+    # Normalise formatting: force newlines after headings, fix tables
+    report = normalise_report_formatting(report)
 
     # Programmatic word limit enforcement
     report = enforce_word_limit(report, HARD_WORD_LIMIT)
@@ -690,7 +750,42 @@ def parse_markdown_table(text: str) -> list[list[str]] | None:
     Each row is a list of cell strings. Returns None if no valid table
     is found. This allows us to render tables using st.dataframe()
     instead of relying on Streamlit's patchy markdown table support.
+
+    Handles two edge cases:
+        1. Table rows on separate lines (normal case)
+        2. Entire table on a single line (LLM formatting error) —
+           splits by detecting '| |' boundaries
     """
+    # First, try to fix tables that appear all on one line.
+    # If text has pipe chars but no line starting with '|', the table
+    # is probably concatenated on a single line.
+    # Look for the pattern: | Header1 | Header2 | ... |---|---| ... | data |
+    if "|" in text:
+        # Split lines that contain multiple | row | row | patterns
+        # by inserting newlines before each '|' that starts a new row
+        fixed_lines = []
+        for line in text.strip().split("\n"):
+            stripped = line.strip()
+            if stripped.count("|") >= 6 and "---" in stripped:
+                # This is likely a single-line table — split into rows
+                # Split by ' |' followed by a space or letter (row boundary)
+                # A row boundary is: '| ' after '| ' (end of cell, start of new row)
+                # Use regex: split where '|' is followed by space and text, and preceded by '|'
+                parts = re.split(r'\|\s*\|', stripped)
+                if len(parts) > 2:
+                    # Reconstruct individual rows
+                    rows_text = []
+                    for part in parts:
+                        clean_part = part.strip().strip("|").strip()
+                        if clean_part:
+                            rows_text.append(f"| {clean_part} |")
+                    fixed_lines.extend(rows_text)
+                else:
+                    fixed_lines.append(stripped)
+            else:
+                fixed_lines.append(stripped)
+        text = "\n".join(fixed_lines)
+
     lines = text.strip().split("\n")
     table_lines = []
     in_table = False
