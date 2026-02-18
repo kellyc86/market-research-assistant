@@ -321,15 +321,14 @@ def count_words(text: str) -> int:
 def normalise_report_formatting(report: str) -> str:
     """Post-process LLM output to guarantee clean markdown structure.
 
-    Problem: LLMs sometimes generate '## Heading Body text...' on a
-    single line instead of placing a newline between the heading and
-    the body paragraph. This breaks every downstream parser (both
-    the Streamlit section renderer and the PDF generator) because
-    they split on '\\n' to separate heading from body.
+    Problem: LLMs inconsistently format headings — sometimes with
+    '##' markers, sometimes without, sometimes with body text on
+    the same line. This breaks all downstream rendering.
 
-    Solution: Use regex to insert a newline after each known heading.
-    Also ensures blank lines between sections and normalises the
-    markdown table format (newlines around pipe rows).
+    Solution: Search for each known heading label (with or without
+    '##' prefix) and enforce a consistent format:
+        \\n\\n## Heading Label\\n
+    followed by the body text on the next line.
 
     This function is idempotent — running it twice produces the
     same result.
@@ -346,19 +345,35 @@ def normalise_report_formatting(report: str) -> str:
         "Final Takeaway",
     ]
 
-    # Force a newline after each ## Heading if the body follows on the same line
     for label in heading_labels:
-        # Match '## Label' followed by text on the same line (no newline)
-        pattern = rf"(##\s*{re.escape(label)})\s*(?!\n)(.+)"
-        replacement = rf"\1\n\2"
-        report = re.sub(pattern, replacement, report)
+        # Match the heading label with optional ## prefix, optional ** bold,
+        # optional whitespace, and capture any body text on the same line.
+        # This handles all variants:
+        #   "## Executive Summary The text..."
+        #   "**Executive Summary** The text..."
+        #   "Executive Summary The text..."
+        #   "## Executive Summary\nThe text..."  (already correct)
+        pattern = (
+            r"(?:\n|\A)\s*"           # Start of line
+            r"(?:\#{1,3}\s*)?"        # Optional ## markers
+            r"(?:\*\*\s*)?"           # Optional opening **
+            rf"({re.escape(label)})"  # The heading label itself
+            r"(?:\s*\*\*)?"           # Optional closing **
+            r"[:\s]*"                 # Optional colon or spaces
+            r"(?:\n|(.+))"           # Newline (good) OR body text on same line (bad)
+        )
 
-    # Ensure a blank line before every ## heading (markdown requires this)
-    report = re.sub(r"([^\n])\n(## )", r"\1\n\n\2", report)
+        def _heading_replacer(m, lbl=label):
+            body_on_same_line = m.group(2)
+            if body_on_same_line:
+                return f"\n\n## {lbl}\n{body_on_same_line.strip()}"
+            else:
+                return f"\n\n## {lbl}\n"
 
-    # Ensure newlines around markdown table rows so they parse correctly
-    # Find pipe-delimited lines and ensure they have their own lines
-    report = re.sub(r"([^\n])(\n?\|)", r"\1\n|", report)
+        report = re.sub(pattern, _heading_replacer, report)
+
+    # Clean up any excessive blank lines (more than 2 consecutive)
+    report = re.sub(r"\n{3,}", "\n\n", report)
 
     return report.strip()
 
@@ -812,28 +827,70 @@ def parse_markdown_table(text: str) -> list[list[str]] | None:
     return rows if len(rows) >= 2 else None
 
 
+def extract_table_from_body(body: str) -> tuple[str, list[list[str]] | None, str]:
+    """Split body text into pre-table, table data, and post-table parts.
+
+    Returns:
+        (pre_table_text, table_rows_or_None, post_table_text)
+
+    If no table is found, returns (body, None, "").
+    """
+    table_data = parse_markdown_table(body)
+    if not table_data:
+        return body, None, ""
+
+    # Find where the table starts and ends in the body
+    lines = body.split("\n")
+    pre_lines = []
+    post_lines = []
+    in_table = False
+    table_ended = False
+
+    for line in lines:
+        stripped = line.strip()
+        is_pipe_row = stripped.startswith("|") and stripped.endswith("|")
+        if is_pipe_row and not table_ended:
+            in_table = True
+            continue
+        if in_table and not is_pipe_row:
+            table_ended = True
+            in_table = False
+        if not in_table and not table_ended:
+            pre_lines.append(line)
+        elif table_ended:
+            post_lines.append(line)
+
+    return (
+        "\n".join(pre_lines).strip(),
+        table_data,
+        "\n".join(post_lines).strip(),
+    )
+
+
 def render_report_section(heading: str, body: str):
     """Render a single report section with proper heading and body.
 
-    Handles markdown tables specially: extracts them and renders
-    via st.dataframe() for reliable display. All other content
-    is rendered as standard markdown.
+    Uses st.subheader for headings to ensure they are visually
+    distinct from body text. Handles markdown tables specially:
+    extracts them and renders via st.dataframe() for reliable
+    display. All other content is rendered as standard markdown.
     """
     import pandas as pd
 
-    st.markdown(f"**{heading}**")
+    # Clean heading of any residual markdown markers
+    clean_heading = heading.strip().strip("#").strip("*").strip()
+    st.subheader(clean_heading, divider=False)
 
     if not body:
         return
 
-    # Check if this section contains a markdown table
-    table_data = parse_markdown_table(body)
+    # Split body into pre-table, table, post-table
+    pre_text, table_data, post_text = extract_table_from_body(body)
+
     if table_data:
         # Render text before the table
-        table_start = body.find("|")
-        pre_table = body[:table_start].strip() if table_start > 0 else ""
-        if pre_table:
-            st.markdown(pre_table)
+        if pre_text:
+            st.markdown(pre_text)
 
         # Render the table using st.dataframe
         headers = table_data[0]
@@ -842,23 +899,8 @@ def render_report_section(heading: str, body: str):
         st.dataframe(df, use_container_width=True, hide_index=True)
 
         # Render text after the table
-        lines = body.split("\n")
-        after_table = False
-        post_lines = []
-        last_pipe_found = False
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("|") and stripped.endswith("|"):
-                last_pipe_found = True
-                continue
-            if last_pipe_found and not stripped.startswith("|"):
-                after_table = True
-            if after_table:
-                post_lines.append(line)
-
-        post_table = "\n".join(post_lines).strip()
-        if post_table:
-            st.markdown(post_table)
+        if post_text:
+            st.markdown(post_text)
     else:
         st.markdown(body)
 
@@ -908,7 +950,7 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
             continue
 
         lines = section.split("\n", 1)
-        heading = lines[0].strip().replace("**", "")
+        heading = lines[0].strip().strip("#").strip("*").strip()
         body = lines[1].strip() if len(lines) > 1 else ""
 
         # Section heading
@@ -920,16 +962,15 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
         if not body:
             continue
 
-        # Check for table in body
-        table_data = parse_markdown_table(body)
+        # Split body into pre-table, table, post-table
+        pre_text, table_data, post_text = extract_table_from_body(body)
+
         if table_data:
             # Render text before table
-            table_start = body.find("|")
-            pre_table = body[:table_start].strip() if table_start > 0 else ""
-            if pre_table:
+            if pre_text:
                 pdf.set_font("Helvetica", "", 10)
                 pdf.set_text_color(40, 40, 40)
-                clean_text = pre_table.replace("**", "")
+                clean_text = pre_text.replace("**", "")
                 pdf.multi_cell(0, 6, txt=clean_text)
                 pdf.ln(2)
 
@@ -956,8 +997,8 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
                     pdf.set_fill_color(245, 245, 245)
                 else:
                     pdf.set_fill_color(255, 255, 255)
-                for i, cell in enumerate(row):
-                    cell_text = cell[:30] if i < num_cols else ""
+                for j, cell in enumerate(row):
+                    cell_text = cell[:30] if j < num_cols else ""
                     pdf.cell(
                         col_width, 7, txt=cell_text,
                         border=1, fill=True, align="C",
@@ -967,20 +1008,6 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
             pdf.ln(3)
 
             # Render text after table
-            after_lines = body.split("\n")
-            after_table = False
-            post_lines = []
-            last_pipe_found = False
-            for line in after_lines:
-                stripped = line.strip()
-                if stripped.startswith("|") and stripped.endswith("|"):
-                    last_pipe_found = True
-                    continue
-                if last_pipe_found and not stripped.startswith("|"):
-                    after_table = True
-                if after_table:
-                    post_lines.append(line)
-            post_text = "\n".join(post_lines).strip()
             if post_text:
                 pdf.set_font("Helvetica", "", 10)
                 pdf.set_text_color(40, 40, 40)
@@ -988,7 +1015,7 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
                 pdf.multi_cell(0, 6, txt=clean_text)
                 pdf.ln(2)
         else:
-            # Regular text section
+            # Regular text section — use multi_cell for text wrapping
             pdf.set_font("Helvetica", "", 10)
             pdf.set_text_color(40, 40, 40)
             clean_body = body.replace("**", "")
