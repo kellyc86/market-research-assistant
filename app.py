@@ -904,9 +904,20 @@ def render_report_section(heading: str, body: str):
 
         # Render the table using st.dataframe
         headers = table_data[0]
-        data_rows = table_data[1:]
-        df = pd.DataFrame(data_rows, columns=headers)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        num_cols = len(headers)
+        # Pad or trim each row to match header count
+        data_rows = []
+        for row in table_data[1:]:
+            if len(row) < num_cols:
+                row = row + [""] * (num_cols - len(row))
+            elif len(row) > num_cols:
+                row = row[:num_cols]
+            data_rows.append(row)
+        if data_rows:
+            df = pd.DataFrame(data_rows, columns=headers)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.info("Table data not available.")
 
         # Render text after the table
         if post_text:
