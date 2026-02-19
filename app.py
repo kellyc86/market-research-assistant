@@ -374,6 +374,30 @@ def count_words(text: str) -> int:
     return len(clean.split())
 
 
+def sanitise_for_streamlit(text: str) -> str:
+    """Remove or escape characters that Streamlit interprets as LaTeX.
+
+    Streamlit's markdown renderer treats the following as LaTeX math
+    delimiters, causing garbled mixed-font text:
+        - $...$ and $$...$$ (inline/block math)
+        - \\(...\\) and \\[...\\] (LaTeX inline/display math)
+
+    This function strips dollar signs entirely (they should not appear
+    in report text — the prompt already forbids them) and escapes
+    backslash-paren/bracket sequences so they render as literal text.
+
+    Applied as a post-processing step before any st.markdown() call.
+    """
+    # Remove dollar signs (cause LaTeX math rendering)
+    text = text.replace("$", "")
+    # Escape LaTeX-style delimiters: \( \) \[ \]
+    text = text.replace("\\(", "(")
+    text = text.replace("\\)", ")")
+    text = text.replace("\\[", "[")
+    text = text.replace("\\]", "]")
+    return text
+
+
 HEADING_LABELS = [
     "Executive Summary",
     "Industry Overview",
@@ -526,7 +550,7 @@ def generate_report(
          "The table MUST have each row on its own line. Example:\n"
          "| Metric | Value | Source |\n"
          "| --- | --- | --- |\n"
-         "| Revenue | $50B | Page title |\n\n"
+         "| Revenue | US50B | Page title |\n\n"
          "If no quantitative data is available, state this explicitly.\n\n"
          "## Strategic Interpretation\n"
          "Explain what the findings mean for decision-makers. Do not "
@@ -544,7 +568,10 @@ def generate_report(
          "================================ WRITING STYLE\n"
          "Tone: concise, analytical, objective, professional, confident.\n"
          "Avoid: fluff, generic phrases, marketing language, repetition.\n"
-         "Each sentence must add value.\n\n"
+         "Each sentence must add value.\n"
+         "CRITICAL: Never use dollar signs ($). Write currency as "
+         "'US1.5 billion' or 'USD 1.5 billion', never '$1.5 billion'. "
+         "Dollar signs cause rendering errors.\n\n"
          "================================ QUALITY CONTROL\n"
          "Before output, verify:\n"
          "- Under {max_words} words\n"
@@ -574,6 +601,10 @@ def generate_report(
         and not line.strip().lower().startswith("*word count")
     ]
     report = "\n".join(cleaned_lines).strip()
+
+    # Sanitise characters that Streamlit renders as LaTeX math,
+    # causing garbled mixed-font text like "US$50billion(FY2023..."
+    report = sanitise_for_streamlit(report)
 
     # Programmatic word limit enforcement
     report = enforce_word_limit(report, HARD_WORD_LIMIT)
@@ -973,12 +1004,20 @@ def extract_table_from_body(body: str) -> tuple[str, list[list[str]] | None, str
         (pre_table_text, table_rows_or_None, post_table_text)
 
     If no table is found, returns (body, None, "").
+
+    Handles two cases:
+        1. Normal: table rows on separate lines starting/ending with '|'
+        2. Edge case: table embedded within a paragraph line — the line
+           contains pipe characters but doesn't start/end with '|'.
+           We detect this by looking for pipe-heavy substrings.
     """
     table_data = parse_markdown_table(body)
     if not table_data:
         return body, None, ""
 
-    # Find where the table starts and ends in the body
+    # Find where the table starts and ends in the body.
+    # Strategy: scan each line and mark any that contain pipe-delimited
+    # table content (starting+ending with '|', or containing '|---|').
     lines = body.split("\n")
     pre_lines = []
     post_lines = []
@@ -987,11 +1026,19 @@ def extract_table_from_body(body: str) -> tuple[str, list[list[str]] | None, str
 
     for line in lines:
         stripped = line.strip()
+        # A line is a table row if it starts and ends with '|'
         is_pipe_row = stripped.startswith("|") and stripped.endswith("|")
-        if is_pipe_row and not table_ended:
+        # Also catch lines containing inline table fragments
+        # (e.g. "Some text | Metric | Value | Source | --- | --- |...")
+        is_inline_table = (
+            not is_pipe_row
+            and stripped.count("|") >= 4
+            and "---" in stripped
+        )
+        if (is_pipe_row or is_inline_table) and not table_ended:
             in_table = True
             continue
-        if in_table and not is_pipe_row:
+        if in_table and not is_pipe_row and not is_inline_table:
             table_ended = True
             in_table = False
         if not in_table and not table_ended:
@@ -1040,7 +1087,7 @@ def render_report_section(heading: str, body: str):
 
         if table_data:
             if pre_text:
-                st.markdown(pre_text)
+                st.markdown(sanitise_for_streamlit(pre_text))
 
             headers = table_data[0]
             num_cols = len(headers)
@@ -1058,9 +1105,9 @@ def render_report_section(heading: str, body: str):
                 st.info("Table data not available.")
 
             if post_text:
-                st.markdown(post_text)
+                st.markdown(sanitise_for_streamlit(post_text))
         else:
-            st.markdown(body)
+            st.markdown(sanitise_for_streamlit(body))
 
 
 def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
