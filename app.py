@@ -22,6 +22,8 @@ import io
 import re
 import streamlit as st
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.retrievers import WikipediaRetriever
 from langchain_core.output_parsers import StrOutputParser
@@ -37,19 +39,37 @@ LLM_OPTIONS = [
     "Gemini 2.5 Flash",
     "Gemini 2.5 Pro",
     "Gemini 2.0 Flash",
-    "Gemini 1.5 Pro",
+    "GPT-4o",
+    "GPT-4o Mini",
+    "Claude Sonnet 4",
+    "Claude Haiku 3.5",
 ]
 LLM_MODEL_MAP = {
     "Gemini 2.5 Flash": "gemini-2.5-flash-preview-05-20",
     "Gemini 2.5 Pro": "gemini-2.5-pro-preview-05-06",
     "Gemini 2.0 Flash": "gemini-2.0-flash",
-    "Gemini 1.5 Pro": "gemini-1.5-pro",
+    "GPT-4o": "gpt-4o",
+    "GPT-4o Mini": "gpt-4o-mini",
+    "Claude Sonnet 4": "claude-sonnet-4-20250514",
+    "Claude Haiku 3.5": "claude-3-5-haiku-20241022",
+}
+LLM_PROVIDER = {
+    "Gemini 2.5 Flash": "google",
+    "Gemini 2.5 Pro": "google",
+    "Gemini 2.0 Flash": "google",
+    "GPT-4o": "openai",
+    "GPT-4o Mini": "openai",
+    "Claude Sonnet 4": "anthropic",
+    "Claude Haiku 3.5": "anthropic",
 }
 LLM_DESCRIPTIONS = {
     "Gemini 2.5 Flash": "⚡ Fast & free — great for quick reports",
-    "Gemini 2.5 Pro": "🏆 Most capable — best report quality",
+    "Gemini 2.5 Pro": "🏆 Most capable Gemini — best report quality",
     "Gemini 2.0 Flash": "⚡ Previous-gen fast model",
-    "Gemini 1.5 Pro": "📊 Previous-gen pro model",
+    "GPT-4o": "🧠 OpenAI's flagship — excellent structured output",
+    "GPT-4o Mini": "⚡ OpenAI's fast & affordable model",
+    "Claude Sonnet 4": "✨ Anthropic's best — superb analytical writing",
+    "Claude Haiku 3.5": "⚡ Anthropic's fast & capable model",
 }
 DEFAULT_TEMPERATURE = 0.2          # Low temperature for factual output
 MAX_WIKI_RESULTS = 10              # Results per search query (broad retrieval)
@@ -68,37 +88,60 @@ def handle_api_error(e: Exception, context: str = "Operation") -> None:
     """Display a user-friendly error message for common API failures.
 
     Centralised error handling ensures consistent messaging and avoids
-    exposing raw API error details to the end user.
+    exposing raw API error details to the end user.  Covers Google
+    Gemini, OpenAI, and Anthropic error patterns.
     """
     error_msg = str(e).lower()
-    if "api key" in error_msg or "api_key" in error_msg:
+    if "api key" in error_msg or "api_key" in error_msg or "invalid x-api-key" in error_msg or "incorrect api key" in error_msg or "authentication" in error_msg:
         st.error(
-            "**Invalid API key.** Please check your Google AI API key "
-            "in the sidebar. Get a free key from "
-            "[Google AI Studio](https://aistudio.google.com/apikey)."
+            "**Invalid API key.** Please check the API key in the sidebar "
+            "and make sure it matches the selected model's provider."
         )
-    elif "resource_exhausted" in error_msg or "429" in error_msg or "quota" in error_msg:
+    elif "resource_exhausted" in error_msg or "429" in error_msg or "quota" in error_msg or "rate_limit" in error_msg:
         st.warning(
-            "**Rate limit reached.** Please wait 1-2 minutes and try again."
+            "**Rate limit reached.** Please wait 1-2 minutes and try again, "
+            "or switch to a different model."
         )
     else:
         st.error(f"{context} failed: {e}")
 
 
-def initialise_llm(model_name: str, api_key: str) -> ChatGoogleGenerativeAI:
-    """Create a LangChain LLM instance with the given configuration.
+def initialise_llm(model_name: str, api_key: str):
+    """Create a LangChain LLM instance for the selected model/provider.
 
+    Supports three providers — Google Gemini, OpenAI, and Anthropic.
     Uses a low temperature to favour factual, deterministic outputs
     suitable for market research analysis.
+
+    Returns a LangChain chat model (ChatGoogleGenerativeAI, ChatOpenAI,
+    or ChatAnthropic) — all share the same invoke/chain interface.
     """
-    return ChatGoogleGenerativeAI(
-        model=LLM_MODEL_MAP[model_name],
-        google_api_key=api_key,
-        temperature=DEFAULT_TEMPERATURE,
-    )
+    provider = LLM_PROVIDER[model_name]
+    model_id = LLM_MODEL_MAP[model_name]
+
+    if provider == "google":
+        return ChatGoogleGenerativeAI(
+            model=model_id,
+            google_api_key=api_key,
+            temperature=DEFAULT_TEMPERATURE,
+        )
+    elif provider == "openai":
+        return ChatOpenAI(
+            model=model_id,
+            api_key=api_key,
+            temperature=DEFAULT_TEMPERATURE,
+        )
+    elif provider == "anthropic":
+        return ChatAnthropic(
+            model=model_id,
+            api_key=api_key,
+            temperature=DEFAULT_TEMPERATURE,
+        )
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
 
 
-def validate_industry(llm: ChatGoogleGenerativeAI, user_input: str) -> dict:
+def validate_industry(llm, user_input: str) -> dict:
     """Use the LLM to determine whether user_input names a real industry.
 
     Returns:
@@ -146,7 +189,7 @@ def validate_industry(llm: ChatGoogleGenerativeAI, user_input: str) -> dict:
     return result
 
 
-def generate_search_queries(llm: ChatGoogleGenerativeAI, industry: str) -> list[str]:
+def generate_search_queries(llm, industry: str) -> list[str]:
     """Use the LLM to generate multiple diverse search queries for Wikipedia.
 
     Design choice: A single search query (e.g. 'renewable energy') often
@@ -230,7 +273,7 @@ def retrieve_wikipedia_pages(industry: str, queries: list[str]) -> list[dict]:
 
 
 def select_top_pages(
-    llm: ChatGoogleGenerativeAI,
+    llm,
     industry: str,
     pages: list[dict],
 ) -> list[dict]:
@@ -490,7 +533,7 @@ def split_report_into_sections(report: str) -> list[tuple[str, str]]:
 
 
 def generate_report(
-    llm: ChatGoogleGenerativeAI,
+    llm,
     industry: str,
     pages: list[dict],
 ) -> str:
@@ -746,22 +789,42 @@ def render_sidebar() -> tuple[str, str]:
         if desc:
             st.caption(desc)
 
+        # Dynamic API key input based on selected provider
+        provider = LLM_PROVIDER.get(selected_model, "google")
+
+        provider_config = {
+            "google": {
+                "label": "Google AI API Key",
+                "placeholder": "Enter your Google AI API key",
+                "help_link": "[Google AI Studio](https://aistudio.google.com/apikey)",
+                "key_id": "google_api_key",
+            },
+            "openai": {
+                "label": "OpenAI API Key",
+                "placeholder": "Enter your OpenAI API key (sk-...)",
+                "help_link": "[OpenAI Platform](https://platform.openai.com/api-keys)",
+                "key_id": "openai_api_key",
+            },
+            "anthropic": {
+                "label": "Anthropic API Key",
+                "placeholder": "Enter your Anthropic API key (sk-ant-...)",
+                "help_link": "[Anthropic Console](https://console.anthropic.com/settings/keys)",
+                "key_id": "anthropic_api_key",
+            },
+        }
+
+        cfg = provider_config[provider]
+
         api_key = st.text_input(
-            "API Key",
+            cfg["label"],
             type="password",
-            placeholder="Enter your Google AI API key",
+            placeholder=cfg["placeholder"],
             help="Your key is not stored and is only used for this session.",
+            key=cfg["key_id"],
         )
 
         st.divider()
-        st.caption(
-            "Get a free API key from "
-            "[Google AI Studio](https://aistudio.google.com/apikey)"
-        )
-        st.caption(
-            "All models use the same Google AI API key. "
-            "Pro models may have stricter rate limits on the free tier."
-        )
+        st.caption(f"Get an API key from {cfg['help_link']}")
 
         # Display pipeline progress
         st.divider()
@@ -788,7 +851,7 @@ def render_sidebar() -> tuple[str, str]:
     return selected_model, api_key
 
 
-def render_step_1(llm: ChatGoogleGenerativeAI):
+def render_step_1(llm):
     """Step 1: Industry input and validation."""
     st.header("Step 1: Enter an Industry")
     st.markdown(
@@ -838,7 +901,7 @@ def render_step_1(llm: ChatGoogleGenerativeAI):
         st.info("Enter an industry name above to get started.")
 
 
-def render_step_2(llm: ChatGoogleGenerativeAI):
+def render_step_2(llm):
     """Step 2: Retrieve and display 5 most relevant Wikipedia sources."""
     industry = st.session_state.validated_industry
 
@@ -1279,7 +1342,7 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
     return bytes(pdf_bytes)
 
 
-def render_step_3(llm: ChatGoogleGenerativeAI, model_name: str = ""):
+def render_step_3(llm, model_name: str = ""):
     """Step 3: Generate and display the industry report.
 
     Rendering strategy:
@@ -1394,7 +1457,7 @@ def main():
     st.title(APP_TITLE)
     st.caption(
         "AI-powered industry analysis from Wikipedia sources  |  "
-        "Built with LangChain + Gemini"
+        "Built with LangChain  |  Multi-model: Gemini, GPT-4o, Claude"
     )
 
     # Sidebar
@@ -1403,9 +1466,8 @@ def main():
     # Gate: require API key
     if not api_key:
         st.info(
-            "Enter your Google AI API key in the sidebar to begin.  \n"
-            "Get a free key from "
-            "[Google AI Studio](https://aistudio.google.com/apikey)."
+            "Select a model and enter your API key in the sidebar to begin.  \n"
+            "Supports **Google Gemini**, **OpenAI GPT-4o**, and **Anthropic Claude**."
         )
         return
 
