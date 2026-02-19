@@ -33,8 +33,24 @@ from fpdf import FPDF
 # ──────────────────────────────────────────────────────────────
 APP_TITLE = "Market Research Assistant"
 APP_ICON = ":material/query_stats:"
-LLM_OPTIONS = ["Gemini 2.5 Flash"]
-LLM_MODEL_MAP = {"Gemini 2.5 Flash": "gemini-2.5-flash"}
+LLM_OPTIONS = [
+    "Gemini 2.5 Flash",
+    "Gemini 2.5 Pro",
+    "Gemini 2.0 Flash",
+    "Gemini 1.5 Pro",
+]
+LLM_MODEL_MAP = {
+    "Gemini 2.5 Flash": "gemini-2.5-flash-preview-05-20",
+    "Gemini 2.5 Pro": "gemini-2.5-pro-preview-05-06",
+    "Gemini 2.0 Flash": "gemini-2.0-flash",
+    "Gemini 1.5 Pro": "gemini-1.5-pro",
+}
+LLM_DESCRIPTIONS = {
+    "Gemini 2.5 Flash": "⚡ Fast & free — great for quick reports",
+    "Gemini 2.5 Pro": "🏆 Most capable — best report quality",
+    "Gemini 2.0 Flash": "⚡ Previous-gen fast model",
+    "Gemini 1.5 Pro": "📊 Previous-gen pro model",
+}
 DEFAULT_TEMPERATURE = 0.2          # Low temperature for factual output
 MAX_WIKI_RESULTS = 10              # Results per search query (broad retrieval)
 FINAL_SOURCE_COUNT = 5             # Exactly 5 URLs returned to user
@@ -629,6 +645,7 @@ def init_session_state():
         "wiki_pages": [],
         "report": "",
         "search_queries": [],
+        "report_model": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -721,8 +738,13 @@ def render_sidebar() -> tuple[str, str]:
             "Select LLM",
             options=LLM_OPTIONS,
             index=0,
-            help="The LLM used for validation and report generation.",
+            help="Choose the AI model for validation and report generation.",
         )
+
+        # Show description for the selected model
+        desc = LLM_DESCRIPTIONS.get(selected_model, "")
+        if desc:
+            st.caption(desc)
 
         api_key = st.text_input(
             "API Key",
@@ -735,6 +757,10 @@ def render_sidebar() -> tuple[str, str]:
         st.caption(
             "Get a free API key from "
             "[Google AI Studio](https://aistudio.google.com/apikey)"
+        )
+        st.caption(
+            "All models use the same Google AI API key. "
+            "Pro models may have stricter rate limits on the free tier."
         )
 
         # Display pipeline progress
@@ -1253,7 +1279,7 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
     return bytes(pdf_bytes)
 
 
-def render_step_3(llm: ChatGoogleGenerativeAI):
+def render_step_3(llm: ChatGoogleGenerativeAI, model_name: str = ""):
     """Step 3: Generate and display the industry report.
 
     Rendering strategy:
@@ -1274,21 +1300,25 @@ def render_step_3(llm: ChatGoogleGenerativeAI):
             try:
                 report = generate_report(llm, industry, pages)
                 st.session_state.report = report
+                st.session_state.report_model = model_name
                 st.session_state.current_step = 4
             except Exception as e:
                 handle_api_error(e, "Report generation")
                 return
 
     report = st.session_state.report
+    used_model = st.session_state.get("report_model", model_name)
 
     # ── Branded report header ──
     page_titles = [p["title"] for p in pages]
     img_url = fetch_industry_image(industry, page_titles)
 
+    model_badge = f"<p>Generated with <strong>{used_model}</strong></p>" if used_model else ""
     st.markdown(
         f'<div class="report-header">'
         f'<h2>{industry}</h2>'
         f'<p>Market Intelligence Report</p>'
+        f'{model_badge}'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -1396,7 +1426,7 @@ def main():
         st.divider()
         render_step_2(llm)
         st.divider()
-        render_step_3(llm)
+        render_step_3(llm, selected_model)
 
 
 if __name__ == "__main__":
