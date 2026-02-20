@@ -38,16 +38,14 @@ APP_ICON = ":material/query_stats:"
 LLM_OPTIONS = [
     "Gemini 2.5 Flash",
     "Gemini 2.5 Pro",
-    "Gemini 2.0 Flash",
     "GPT-4o",
     "GPT-4o Mini",
     "Claude Sonnet 4",
     "Claude Haiku 3.5",
 ]
 LLM_MODEL_MAP = {
-    "Gemini 2.5 Flash": "gemini-2.5-flash-preview-05-20",
-    "Gemini 2.5 Pro": "gemini-2.5-pro-preview-05-06",
-    "Gemini 2.0 Flash": "gemini-2.0-flash",
+    "Gemini 2.5 Flash": "gemini-2.5-flash",
+    "Gemini 2.5 Pro": "gemini-2.5-pro",
     "GPT-4o": "gpt-4o",
     "GPT-4o Mini": "gpt-4o-mini",
     "Claude Sonnet 4": "claude-sonnet-4-20250514",
@@ -56,7 +54,6 @@ LLM_MODEL_MAP = {
 LLM_PROVIDER = {
     "Gemini 2.5 Flash": "google",
     "Gemini 2.5 Pro": "google",
-    "Gemini 2.0 Flash": "google",
     "GPT-4o": "openai",
     "GPT-4o Mini": "openai",
     "Claude Sonnet 4": "anthropic",
@@ -65,7 +62,6 @@ LLM_PROVIDER = {
 LLM_DESCRIPTIONS = {
     "Gemini 2.5 Flash": "⚡ Fast & free — great for quick reports",
     "Gemini 2.5 Pro": "🏆 Most capable Gemini — best report quality",
-    "Gemini 2.0 Flash": "⚡ Previous-gen fast model",
     "GPT-4o": "🧠 OpenAI's flagship — excellent structured output",
     "GPT-4o Mini": "⚡ OpenAI's fast & affordable model",
     "Claude Sonnet 4": "✨ Anthropic's best — superb analytical writing",
