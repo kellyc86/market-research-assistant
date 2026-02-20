@@ -459,6 +459,7 @@ def sanitise_for_streamlit(text: str) -> str:
 
 HEADING_LABELS = [
     "Executive Summary",
+    "Key Metrics",
     "Industry Overview",
     "Market Structure & Competitive Dynamics",
     "Growth Drivers",
@@ -594,6 +595,16 @@ def generate_report(
          "## Executive Summary\n"
          "Key insight, strategic implication, and recommendation in "
          "2-3 sentences.\n\n"
+         "## Key Metrics\n"
+         "Extract exactly 3 key quantitative metrics from the sources. "
+         "Format EACH metric on its own line as:\n"
+         "LABEL: value\n\n"
+         "Example:\n"
+         "Global Market Size: USD 1.5 trillion (2024)\n"
+         "Annual Growth Rate: 8.2% CAGR\n"
+         "Market Concentration: Top 5 firms hold 45% share\n\n"
+         "If quantitative data is scarce, use the best available figures. "
+         "Always include the source page title in parentheses.\n\n"
          "## Industry Overview\n"
          "Definition, scope, and scale indicators.\n\n"
          "## Market Structure & Competitive Dynamics\n"
@@ -722,44 +733,215 @@ def inject_custom_css():
     """
     st.markdown("""
     <style>
-    /* Report section card styling */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    /* ── Global Typography ── */
+    .report-section, .insight-callout, .takeaway-box,
+    .kpi-card, .source-card, .report-header {
+        font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+    }
+
+    /* ── Report Section Cards ── */
     .report-section {
-        background: #fafbfc;
-        border-left: 4px solid #1e50a0;
-        padding: 1rem 1.2rem;
-        margin-bottom: 1rem;
-        border-radius: 0 8px 8px 0;
+        background: #FFFFFF;
+        border-left: 4px solid #003A70;
+        padding: 1.2rem 1.5rem;
+        margin-bottom: 1.2rem;
+        border-radius: 0 6px 6px 0;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+        line-height: 1.6;
+        color: #333333;
+        font-size: 15px;
     }
     .report-section h3 {
-        color: #1e50a0;
+        color: #003A70;
         margin-top: 0;
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
     }
 
-    /* Source card styling */
-    .source-card {
-        background: #f8f9fa;
-        border: 1px solid #e0e4e8;
+    /* ── Executive Summary — Insight Callout ── */
+    .insight-callout {
+        background: linear-gradient(135deg, #F0F6FC 0%, #E8F0FE 100%);
+        border-left: 5px solid #003A70;
+        padding: 1.4rem 1.6rem;
+        margin-bottom: 1.2rem;
+        border-radius: 0 8px 8px 0;
+        box-shadow: 0 2px 6px rgba(0,58,112,0.08);
+        line-height: 1.7;
+        color: #1A1A2E;
+        font-size: 15px;
+    }
+    .insight-callout .callout-label {
+        font-weight: 700;
+        color: #003A70;
+        text-transform: uppercase;
+        font-size: 11px;
+        letter-spacing: 1.5px;
+        margin-bottom: 10px;
+        display: block;
+    }
+    .insight-callout h3 {
+        color: #003A70;
+        margin-top: 0;
+        font-size: 22px;
+        font-weight: 700;
+    }
+    .insight-callout p {
+        margin: 0.5rem 0 0 0;
+        font-size: 15px;
+    }
+
+    /* ── Final Takeaway — Conclusion Box ── */
+    .takeaway-box {
+        background: #003A70;
+        color: #FFFFFF;
+        padding: 1.4rem 1.6rem;
+        margin: 1.5rem 0 1.2rem 0;
         border-radius: 8px;
-        padding: 0.6rem 1rem;
-        margin-bottom: 0.5rem;
+        box-shadow: 0 3px 10px rgba(0,58,112,0.2);
+        line-height: 1.7;
+        font-size: 15px;
+    }
+    .takeaway-box .callout-label {
+        font-weight: 700;
+        color: #80B8E3;
+        text-transform: uppercase;
+        font-size: 11px;
+        letter-spacing: 1.5px;
+        margin-bottom: 10px;
+        display: block;
+    }
+    .takeaway-box h3 {
+        color: #FFFFFF !important;
+        margin-top: 0;
+        font-size: 20px;
+        font-weight: 700;
+    }
+    .takeaway-box p {
+        color: rgba(255,255,255,0.92);
+        margin: 0.5rem 0 0 0;
     }
 
-    /* Branded header area */
+    /* ── KPI Metric Cards ── */
+    .kpi-row {
+        display: flex;
+        gap: 1rem;
+        margin: 1rem 0 1.5rem 0;
+    }
+    .kpi-card {
+        flex: 1;
+        background: #FFFFFF;
+        border: 1px solid #E0E4E8;
+        border-top: 4px solid #0085CA;
+        border-radius: 8px;
+        padding: 1.2rem 1rem;
+        text-align: center;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+    }
+    .kpi-card .kpi-value {
+        font-size: 32px;
+        font-weight: 700;
+        color: #003A70;
+        line-height: 1.2;
+        margin-bottom: 6px;
+    }
+    .kpi-card .kpi-label {
+        font-size: 12px;
+        font-weight: 500;
+        color: #666666;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    /* ── Styled Data Table ── */
+    .mckinsey-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 1rem 0;
+        font-size: 14px;
+    }
+    .mckinsey-table thead th {
+        background: #003A70;
+        color: #FFFFFF;
+        padding: 10px 14px;
+        text-align: left;
+        font-weight: 600;
+        font-size: 13px;
+        letter-spacing: 0.3px;
+    }
+    .mckinsey-table tbody td {
+        padding: 9px 14px;
+        border-bottom: 1px solid #E8ECF0;
+        color: #333333;
+    }
+    .mckinsey-table tbody tr:nth-child(even) {
+        background: #F8F9FB;
+    }
+    .mckinsey-table tbody tr:hover {
+        background: #EEF3F8;
+    }
+    .table-source {
+        font-size: 11px;
+        color: #999999;
+        font-style: italic;
+        margin-top: 4px;
+    }
+
+    /* ── Source Cards ── */
+    .source-card {
+        background: #FFFFFF;
+        border: 1px solid #E0E4E8;
+        border-radius: 8px;
+        padding: 0.7rem 1.1rem;
+        margin-bottom: 0.5rem;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+        font-size: 14px;
+    }
+
+    /* ── Report Header ── */
     .report-header {
-        background: linear-gradient(135deg, #1e50a0 0%, #2d6fd4 100%);
+        background: linear-gradient(135deg, #003A70 0%, #00578A 100%);
         color: white;
-        padding: 1.5rem;
+        padding: 2rem 1.5rem;
         border-radius: 10px;
-        margin-bottom: 1rem;
+        margin-bottom: 1.2rem;
         text-align: center;
     }
     .report-header h2 {
         color: white !important;
         margin: 0;
+        font-size: 28px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
     }
-    .report-header p {
-        color: rgba(255,255,255,0.8);
-        margin: 0.3rem 0 0 0;
+    .report-header .subtitle {
+        color: rgba(255,255,255,0.75);
+        margin: 0.4rem 0 0 0;
+        font-size: 14px;
+        font-weight: 400;
+    }
+    .report-header .model-badge {
+        display: inline-block;
+        background: rgba(255,255,255,0.15);
+        color: rgba(255,255,255,0.9);
+        padding: 3px 12px;
+        border-radius: 12px;
+        font-size: 12px;
+        margin-top: 8px;
+    }
+
+    /* ── Source Citations Footer ── */
+    .sources-footer {
+        font-size: 12px;
+        color: #888888;
+        font-style: italic;
+        line-height: 1.6;
+        padding-top: 0.5rem;
+    }
+    .sources-footer a {
+        color: #0085CA;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -1142,26 +1324,131 @@ def extract_table_from_body(body: str) -> tuple[str, list[list[str]] | None, str
     )
 
 
-def render_report_section(heading: str, body: str):
-    """Render a single report section in a styled container.
+def render_kpi_cards(body: str):
+    """Render Key Metrics as large hero-number KPI cards.
 
-    Each section gets:
-        - A coloured subheader (via st.subheader)
-        - Body text wrapped in a styled container with left border
-        - Tables rendered via st.dataframe for reliability
-
-    Design choice: wrapping sections in containers with visual
-    separation (coloured left border) makes the report scannable
-    and professional. This is a common pattern in consulting
-    deliverables and executive dashboards.
+    Expects the body to contain lines formatted as:
+        LABEL: value
+    Renders up to 3 metrics as styled cards in a horizontal row.
     """
-    import pandas as pd
+    metrics = []
+    for line in body.strip().split("\n"):
+        line = line.strip().strip("-").strip("*").strip()
+        if ":" in line and line:
+            parts = line.split(":", 1)
+            label = parts[0].strip().strip("*").strip()
+            value = parts[1].strip().strip("*").strip()
+            if label and value:
+                metrics.append((label, value))
+    if not metrics:
+        st.markdown(sanitise_for_streamlit(body))
+        return
 
+    # Limit to 3 cards maximum
+    metrics = metrics[:3]
+    cards_html = '<div class="kpi-row">'
+    for label, value in metrics:
+        safe_value = sanitise_for_streamlit(value)
+        safe_label = sanitise_for_streamlit(label)
+        cards_html += (
+            f'<div class="kpi-card">'
+            f'<div class="kpi-value">{safe_value}</div>'
+            f'<div class="kpi-label">{safe_label}</div>'
+            f'</div>'
+        )
+    cards_html += '</div>'
+    st.markdown(cards_html, unsafe_allow_html=True)
+
+
+def render_styled_table(table_data: list[list[str]]):
+    """Render a table as styled HTML matching McKinsey's minimal table style.
+
+    Navy header row, no vertical borders, alternating row shading,
+    hover effect. Much more professional than st.dataframe().
+    """
+    if not table_data or len(table_data) < 2:
+        st.info("Table data not available.")
+        return
+
+    headers = table_data[0]
+    num_cols = len(headers)
+
+    html = '<table class="mckinsey-table"><thead><tr>'
+    for h in headers:
+        html += f'<th>{sanitise_for_streamlit(h)}</th>'
+    html += '</tr></thead><tbody>'
+
+    for row in table_data[1:]:
+        # Pad or trim row to match header count
+        while len(row) < num_cols:
+            row.append("")
+        row = row[:num_cols]
+        html += '<tr>'
+        for cell in row:
+            html += f'<td>{sanitise_for_streamlit(cell)}</td>'
+        html += '</tr>'
+
+    html += '</tbody></table>'
+    html += '<div class="table-source">Source: Wikipedia (retrieved data)</div>'
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def render_report_section(heading: str, body: str):
+    """Render a single report section with McKinsey-grade styling.
+
+    Section-specific rendering:
+        - Executive Summary → highlighted insight callout box
+        - Key Metrics → large KPI hero-number cards
+        - Final Takeaway → navy conclusion box
+        - Key Data → styled HTML table (navy header, alternating rows)
+        - All others → clean section card with left border
+
+    Design choice: matching consulting deliverable standards with
+    distinct visual treatment for different section types makes the
+    report immediately scannable by senior decision-makers.
+    """
     # Clean heading of any residual markdown markers
     clean_heading = heading.strip().strip("#").strip("*").strip()
 
-    # Use a container for visual grouping
     with st.container():
+
+        # ── Executive Summary → insight callout ──
+        if clean_heading == "Executive Summary":
+            safe_body = sanitise_for_streamlit(body) if body else ""
+            st.markdown(
+                f'<div class="insight-callout">'
+                f'<span class="callout-label">Key Insight</span>'
+                f'<h3>{clean_heading}</h3>'
+                f'<p>{safe_body}</p>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            return
+
+        # ── Key Metrics → KPI cards ──
+        if clean_heading == "Key Metrics":
+            st.markdown(
+                f'<div class="report-section"><h3>{clean_heading}</h3></div>',
+                unsafe_allow_html=True,
+            )
+            if body:
+                render_kpi_cards(body)
+            return
+
+        # ── Final Takeaway → navy conclusion box ──
+        if clean_heading == "Final Takeaway":
+            safe_body = sanitise_for_streamlit(body) if body else ""
+            st.markdown(
+                f'<div class="takeaway-box">'
+                f'<span class="callout-label">Bottom Line</span>'
+                f'<h3>{clean_heading}</h3>'
+                f'<p>{safe_body}</p>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            return
+
+        # ── All other sections → standard card ──
         st.markdown(
             f'<div class="report-section">'
             f'<h3>{clean_heading}</h3></div>',
@@ -1178,20 +1465,7 @@ def render_report_section(heading: str, body: str):
             if pre_text:
                 st.markdown(sanitise_for_streamlit(pre_text))
 
-            headers = table_data[0]
-            num_cols = len(headers)
-            data_rows = []
-            for row in table_data[1:]:
-                if len(row) < num_cols:
-                    row = row + [""] * (num_cols - len(row))
-                elif len(row) > num_cols:
-                    row = row[:num_cols]
-                data_rows.append(row)
-            if data_rows:
-                df = pd.DataFrame(data_rows, columns=headers)
-                st.dataframe(df, use_container_width=True, hide_index=True)
-            else:
-                st.info("Table data not available.")
+            render_styled_table(table_data)
 
             if post_text:
                 st.markdown(sanitise_for_streamlit(post_text))
@@ -1218,21 +1492,24 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
     pdf.add_page()
 
     # ── Title ──
-    pdf.set_font("Helvetica", "B", 22)
-    pdf.set_text_color(30, 30, 30)
+    from datetime import date
+    today_str = date.today().strftime("%B %d, %Y")
+
+    pdf.set_font("Helvetica", "B", 24)
+    pdf.set_text_color(0, 58, 112)  # McKinsey navy #003A70
     pdf.cell(0, 14, txt=industry, new_x="LMARGIN", new_y="NEXT", align="C")
 
     pdf.set_font("Helvetica", "", 11)
     pdf.set_text_color(100, 100, 100)
     pdf.cell(
         0, 8,
-        txt="Market Intelligence Report",
+        txt=f"Market Intelligence Report  |  {today_str}",
         new_x="LMARGIN", new_y="NEXT", align="C",
     )
 
     # Divider line
     pdf.ln(4)
-    pdf.set_draw_color(200, 200, 200)
+    pdf.set_draw_color(0, 58, 112)
     pdf.line(20, pdf.get_y(), 190, pdf.get_y())
     pdf.ln(6)
 
@@ -1242,7 +1519,7 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
 
         # Section heading
         pdf.set_font("Helvetica", "B", 13)
-        pdf.set_text_color(30, 80, 160)
+        pdf.set_text_color(0, 58, 112)  # McKinsey navy
         pdf.cell(0, 10, txt=heading, new_x="LMARGIN", new_y="NEXT")
         pdf.ln(1)
 
@@ -1270,7 +1547,7 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
 
             # Table header
             pdf.set_font("Helvetica", "B", 9)
-            pdf.set_fill_color(30, 80, 160)
+            pdf.set_fill_color(0, 58, 112)  # McKinsey navy
             pdf.set_text_color(255, 255, 255)
             for header in headers:
                 pdf.cell(col_width, 7, txt=header[:30], border=1, fill=True, align="C")
@@ -1316,7 +1593,7 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
     pdf.ln(4)
 
     pdf.set_font("Helvetica", "B", 13)
-    pdf.set_text_color(30, 80, 160)
+    pdf.set_text_color(0, 58, 112)  # McKinsey navy
     pdf.cell(0, 10, txt="References", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
 
@@ -1373,14 +1650,20 @@ def render_step_3(llm, model_name: str = ""):
     used_model = st.session_state.get("report_model", model_name)
 
     # ── Branded report header ──
+    from datetime import date
+    today = date.today().strftime("%B %d, %Y")
+
     page_titles = [p["title"] for p in pages]
     img_url = fetch_industry_image(industry, page_titles)
 
-    model_badge = f"<p>Generated with <strong>{used_model}</strong></p>" if used_model else ""
+    model_badge = (
+        f'<span class="model-badge">Generated with {used_model}</span>'
+        if used_model else ""
+    )
     st.markdown(
         f'<div class="report-header">'
         f'<h2>{industry}</h2>'
-        f'<p>Market Intelligence Report</p>'
+        f'<p class="subtitle">Market Intelligence Report &nbsp;|&nbsp; {today}</p>'
         f'{model_badge}'
         f'</div>',
         unsafe_allow_html=True,
@@ -1389,14 +1672,11 @@ def render_step_3(llm, model_name: str = ""):
     if img_url:
         st.image(img_url, use_container_width=True)
 
-    st.divider()
-
     # ── Render the report section by section ──
     # Use heading-label-based splitting (format-agnostic)
     sections = split_report_into_sections(report)
     for heading, body in sections:
         render_report_section(heading, body)
-        st.markdown("")  # Spacing
 
     # ── Word count badge ──
     wc = count_words(report)
@@ -1405,11 +1685,21 @@ def render_step_3(llm, model_name: str = ""):
     else:
         st.error(f"Word count: {wc} / {HARD_WORD_LIMIT} — over limit")
 
-    # ── Sources section ──
-    st.divider()
-    st.markdown("**Sources**")
+    # ── Sources section — styled as professional citations ──
+    st.markdown("---")
+    sources_html = '<div class="sources-footer"><strong>References</strong><br>'
     for i, page in enumerate(st.session_state.wiki_pages, 1):
-        st.markdown(f"{i}. [{page['title']}]({page['url']})")
+        title = page.get("title", "Unknown")
+        url = page.get("url", "")
+        sources_html += (
+            f'[{i}] {title} — '
+            f'<a href="{url}" target="_blank">Wikipedia</a><br>'
+        )
+    sources_html += (
+        f'<br><em>Source: Wikipedia | Analysis generated by Market Research '
+        f'Assistant | {today}</em></div>'
+    )
+    st.markdown(sources_html, unsafe_allow_html=True)
 
     # ── Actions ──
     st.divider()
