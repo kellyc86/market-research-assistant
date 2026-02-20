@@ -975,19 +975,16 @@ def render_sidebar() -> tuple[str, str]:
                 "label": "Google AI API Key",
                 "placeholder": "Enter your Google AI API key",
                 "help_link": "[Google AI Studio](https://aistudio.google.com/apikey)",
-                "key_id": "google_api_key",
             },
             "openai": {
                 "label": "OpenAI API Key",
                 "placeholder": "Enter your OpenAI API key (sk-...)",
                 "help_link": "[OpenAI Platform](https://platform.openai.com/api-keys)",
-                "key_id": "openai_api_key",
             },
             "anthropic": {
                 "label": "Anthropic API Key",
                 "placeholder": "Enter your Anthropic API key (sk-ant-...)",
                 "help_link": "[Anthropic Console](https://console.anthropic.com/settings/keys)",
-                "key_id": "anthropic_api_key",
             },
         }
 
@@ -998,7 +995,7 @@ def render_sidebar() -> tuple[str, str]:
             type="password",
             placeholder=cfg["placeholder"],
             help="Your key is not stored and is only used for this session.",
-            key=cfg["key_id"],
+            key="api_key",
         )
 
         st.divider()
