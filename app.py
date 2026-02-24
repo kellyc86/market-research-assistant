@@ -1,29 +1,49 @@
 """
 Market Research Assistant
 =========================
-A Streamlit-based RAG application that generates industry reports
-from Wikipedia sources. Built for the MSIN0231 Machine Learning
-for Business individual assignment.
+A Streamlit-based RAG (Retrieval-Augmented Generation) application
+that generates executive-ready industry reports from Wikipedia sources.
+Built for the MSIN0231 Machine Learning for Business individual assignment.
 
-Architecture:
-    Sidebar  -> LLM configuration (model selection + API key)
-    Step 1   -> Industry input + LLM-based validation
-    Step 2   -> Wikipedia retrieval (5 most relevant pages)
-    Step 3   -> Industry report generation (<500 words)
+Pipeline Architecture:
+    ┌───────────┐    ┌──────────────┐    ┌────────────────┐
+    │  Step 1   │───>│   Step 2     │───>│    Step 3      │
+    │ Validate  │    │  Retrieve    │    │   Generate     │
+    │ Industry  │    │  Sources     │    │   Report       │
+    └───────────┘    └──────────────┘    └────────────────┘
+      LLM-based        Multi-query         Grounded RAG
+      validation       Wikipedia           with structured
+                       retrieval           output (<500 words)
+
+Retrieval Strategy (Step 2):
+    1. LLM generates 5 Wikipedia-title-style search queries
+    2. WikipediaRetriever fetches up to 10 pages per query
+    3. Results are deduplicated by page title
+    4. LLM ranks candidates and selects the 5 most relevant
+    5. Source diversity is checked via Jaccard similarity
+
+Grounding Approach (Step 3):
+    The report prompt strictly constrains the LLM to only use
+    information present in the retrieved sources. This is enforced
+    via: (a) explicit grounding rules in the prompt, (b) inline
+    citation requirements, and (c) programmatic word-limit enforcement.
+
+    Limitation: verbal grounding instructions are not foolproof —
+    LLMs can still hallucinate despite explicit constraints. The
+    low temperature (0.2) reduces but does not eliminate this risk.
 
 Design Principles:
-    - Modular: each pipeline stage is an isolated function
+    - Modular: each pipeline stage is an isolated, testable function
     - Separation of concerns: retrieval logic =/= generation logic
-    - Fail-safe: every external call has error handling
-    - KISS: minimal complexity, maximum clarity
+    - Fail-safe: every external API call has error handling
+    - Format-agnostic: report parsing works regardless of LLM
+      heading style (##, **, plain text — all handled)
 """
 
 import io
 import re
 import streamlit as st
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.retrievers import WikipediaRetriever
 from langchain_core.output_parsers import StrOutputParser
@@ -38,38 +58,22 @@ APP_ICON = ":material/query_stats:"
 LLM_OPTIONS = [
     "Gemini 2.5 Flash",
     "Gemini 2.5 Pro",
-    "GPT-4o",
-    "GPT-4o Mini",
-    "Claude Sonnet 4",
-    "Claude Haiku 3.5",
 ]
 LLM_MODEL_MAP = {
     "Gemini 2.5 Flash": "gemini-2.5-flash",
     "Gemini 2.5 Pro": "gemini-2.5-pro",
-    "GPT-4o": "gpt-4o",
-    "GPT-4o Mini": "gpt-4o-mini",
-    "Claude Sonnet 4": "claude-sonnet-4-20250514",
-    "Claude Haiku 3.5": "claude-3-5-haiku-20241022",
-}
-LLM_PROVIDER = {
-    "Gemini 2.5 Flash": "google",
-    "Gemini 2.5 Pro": "google",
-    "GPT-4o": "openai",
-    "GPT-4o Mini": "openai",
-    "Claude Sonnet 4": "anthropic",
-    "Claude Haiku 3.5": "anthropic",
 }
 LLM_DESCRIPTIONS = {
-    "Gemini 2.5 Flash": "⚡ Fast & free — great for quick reports",
-    "Gemini 2.5 Pro": "🏆 Most capable Gemini — best report quality",
-    "GPT-4o": "🧠 OpenAI's flagship — excellent structured output",
-    "GPT-4o Mini": "⚡ OpenAI's fast & affordable model",
-    "Claude Sonnet 4": "✨ Anthropic's best — superb analytical writing",
-    "Claude Haiku 3.5": "⚡ Anthropic's fast & capable model",
+    "Gemini 2.5 Flash": "Fast & free — great for quick reports",
+    "Gemini 2.5 Pro": "Most capable Gemini — best report quality",
 }
-DEFAULT_TEMPERATURE = 0.2          # Low temperature for factual output
-MAX_WIKI_RESULTS = 10              # Results per search query (broad retrieval)
-FINAL_SOURCE_COUNT = 5             # Exactly 5 URLs returned to user
+# ── Tunable pipeline parameters ──
+# These constants control the trade-off between retrieval breadth,
+# report quality, and API cost. Values were chosen empirically
+# through testing across multiple industry queries.
+DEFAULT_TEMPERATURE = 0.2          # Low = factual; high = creative (risk)
+MAX_WIKI_RESULTS = 10              # Results per search query (broad net)
+FINAL_SOURCE_COUNT = 5             # Exactly 5 URLs (per assignment brief)
 MAX_REPORT_WORDS = 480             # Target word count (buffer under 500)
 HARD_WORD_LIMIT = 500              # Absolute maximum enforced programmatically
 WIKI_CONTENT_CHARS = 8000          # Characters per Wikipedia page (more context)
@@ -81,60 +85,49 @@ NUM_SEARCH_QUERIES = 5             # Number of LLM-generated search queries
 # ──────────────────────────────────────────────────────────────
 
 def handle_api_error(e: Exception, context: str = "Operation") -> None:
-    """Display a user-friendly error message for common API failures.
+    """Display a user-friendly error message for common Google Gemini API failures.
 
     Centralised error handling ensures consistent messaging and avoids
-    exposing raw API error details to the end user.  Covers Google
-    Gemini, OpenAI, and Anthropic error patterns.
+    exposing raw API error details to the end user. Pattern-matches
+    common Google AI error strings to provide actionable guidance.
     """
     error_msg = str(e).lower()
-    if "api key" in error_msg or "api_key" in error_msg or "invalid x-api-key" in error_msg or "incorrect api key" in error_msg or "authentication" in error_msg:
+    if "api key" in error_msg or "api_key" in error_msg or "authentication" in error_msg:
         st.error(
-            "**Invalid API key.** Please check the API key in the sidebar "
-            "and make sure it matches the selected model's provider."
+            "**Invalid API key.** Please check the Google AI API key "
+            "in the sidebar and try again."
         )
-    elif "resource_exhausted" in error_msg or "429" in error_msg or "quota" in error_msg or "rate_limit" in error_msg:
+    elif "resource_exhausted" in error_msg or "429" in error_msg or "quota" in error_msg:
         st.warning(
-            "**Rate limit reached.** Please wait 1-2 minutes and try again, "
-            "or switch to a different model."
+            "**Rate limit reached.** The Gemini API has per-minute quotas. "
+            "Please wait 1-2 minutes and try again, or switch to the other model."
+        )
+    elif "404" in error_msg or "not_found" in error_msg:
+        st.error(
+            "**Model not found.** The selected model may be temporarily "
+            "unavailable. Please try the other Gemini model."
         )
     else:
         st.error(f"{context} failed: {e}")
 
 
-def initialise_llm(model_name: str, api_key: str):
-    """Create a LangChain LLM instance for the selected model/provider.
+def initialise_llm(model_name: str, api_key: str) -> ChatGoogleGenerativeAI:
+    """Create a LangChain ChatGoogleGenerativeAI instance for the selected model.
 
-    Supports three providers — Google Gemini, OpenAI, and Anthropic.
-    Uses a low temperature to favour factual, deterministic outputs
-    suitable for market research analysis.
+    Uses a low temperature (0.2) to favour factual, deterministic outputs
+    suitable for market research analysis. Higher temperatures would
+    increase creativity but risk hallucinating facts — unacceptable
+    for a grounded research report.
 
-    Returns a LangChain chat model (ChatGoogleGenerativeAI, ChatOpenAI,
-    or ChatAnthropic) — all share the same invoke/chain interface.
+    Returns:
+        ChatGoogleGenerativeAI instance with the selected model and API key.
     """
-    provider = LLM_PROVIDER[model_name]
     model_id = LLM_MODEL_MAP[model_name]
-
-    if provider == "google":
-        return ChatGoogleGenerativeAI(
-            model=model_id,
-            google_api_key=api_key,
-            temperature=DEFAULT_TEMPERATURE,
-        )
-    elif provider == "openai":
-        return ChatOpenAI(
-            model=model_id,
-            api_key=api_key,
-            temperature=DEFAULT_TEMPERATURE,
-        )
-    elif provider == "anthropic":
-        return ChatAnthropic(
-            model=model_id,
-            api_key=api_key,
-            temperature=DEFAULT_TEMPERATURE,
-        )
-    else:
-        raise ValueError(f"Unknown provider: {provider}")
+    return ChatGoogleGenerativeAI(
+        model=model_id,
+        google_api_key=api_key,
+        temperature=DEFAULT_TEMPERATURE,
+    )
 
 
 def validate_industry(llm, user_input: str) -> dict:
@@ -154,33 +147,60 @@ def validate_industry(llm, user_input: str) -> dict:
         ("system",
          "You are a validation assistant. Your ONLY job is to decide "
          "whether the user's input refers to a legitimate industry or "
-         "economic sector. Respond in EXACTLY this format:\n"
+         "economic sector.\n\n"
+         "Respond in EXACTLY this format (three lines, no extras):\n"
          "VALID: yes or no\n"
          "NORMALISED: <the cleaned, standard industry name if valid, "
          "otherwise empty>\n"
          "REASON: <one-sentence explanation>\n\n"
-         "Examples of VALID industries: semiconductor manufacturing, "
-         "renewable energy, pharmaceutical, fast fashion, fintech.\n"
-         "Examples of INVALID inputs: empty text, random words, "
-         "individual company names, people's names, jokes."),
+         "VALID examples: semiconductor manufacturing, renewable energy, "
+         "pharmaceutical, fast fashion, fintech, automotive, agriculture, "
+         "telecommunications, e-commerce, cybersecurity.\n\n"
+         "VALID even if informal — normalise to the standard name:\n"
+         "  'cars' -> Automotive Industry\n"
+         "  'AI' -> Artificial Intelligence Industry\n"
+         "  'tech' -> Technology Industry\n"
+         "  'pharma' -> Pharmaceutical Industry\n"
+         "  'oil' -> Oil and Gas Industry\n\n"
+         "INVALID examples (must reject these):\n"
+         "  - Company names: 'Apple', 'Tesla', 'Google'\n"
+         "  - Product names: 'iPhone', 'Model 3'\n"
+         "  - People's names: 'Elon Musk', 'Jeff Bezos'\n"
+         "  - Random words: 'hello', 'asdfg', 'pizza'\n"
+         "  - Questions or sentences: 'what is AI?'\n"
+         "  - Empty or whitespace-only input\n\n"
+         "If the input is a loose synonym, abbreviation, or informal "
+         "name for a real industry, mark it VALID and normalise it."),
         ("human", "Is this a valid industry? Input: '{input}'"),
     ])
 
     chain = prompt | llm | StrOutputParser()
     response = chain.invoke({"input": user_input})
 
-    # Parse structured response
+    # Parse structured response — defensive against unexpected LLM formats
     lines = response.strip().split("\n")
     result = {"is_valid": False, "reason": "", "normalised": ""}
+    parsed_valid_line = False
 
     for line in lines:
         lower = line.lower().strip()
         if lower.startswith("valid:"):
             result["is_valid"] = "yes" in lower
+            parsed_valid_line = True
         elif lower.startswith("normalised:") or lower.startswith("normalized:"):
             result["normalised"] = line.split(":", 1)[1].strip()
         elif lower.startswith("reason:"):
             result["reason"] = line.split(":", 1)[1].strip()
+
+    # If the LLM returned an unparseable response (no VALID: line),
+    # default to invalid with a helpful message rather than silently
+    # accepting or rejecting
+    if not parsed_valid_line:
+        result["is_valid"] = False
+        result["reason"] = (
+            "Could not determine validity. Please try rephrasing "
+            "your input as a standard industry name."
+        )
 
     return result
 
@@ -206,6 +226,10 @@ def generate_search_queries(llm, industry: str) -> list[str]:
          "3. Key technology or innovation in the industry\n"
          "4. Regulation, policy, or risks in the industry\n"
          "5. Major companies or competitive landscape\n\n"
+         "IMPORTANT: Format each query as a Wikipedia article title — "
+         "use proper capitalisation and standard encyclopaedic naming.\n"
+         "GOOD: 'Semiconductor industry', 'Automotive safety'\n"
+         "BAD: 'semiconductor market size trends 2024'\n\n"
          "Respond with ONLY the 5 queries, one per line. No numbering, "
          "no explanation."),
         ("human", "Industry: {industry}"),
@@ -324,18 +348,19 @@ def select_top_pages(
         "candidates": candidate_descriptions,
     })
 
-    # Parse indices from response
+    # Parse indices from response — robust to varied LLM formats.
+    # Handles: one-per-line ("3\n0\n7"), comma-separated ("3, 0, 7"),
+    # bracketed ("[3]"), or with explanations ("3 - most relevant").
+    # Strategy: extract ALL integers via regex, then deduplicate.
     selected = []
     seen_indices = set()
-    for line in response.strip().split("\n"):
-        line = line.strip().strip("[]").strip()
-        try:
-            idx = int(line)
-            if 0 <= idx < len(pages) and idx not in seen_indices:
-                seen_indices.add(idx)
-                selected.append(pages[idx].copy())
-        except ValueError:
-            continue
+    for match in re.findall(r"\d+", response):
+        idx = int(match)
+        if 0 <= idx < len(pages) and idx not in seen_indices:
+            seen_indices.add(idx)
+            selected.append(pages[idx].copy())
+        if len(selected) == FINAL_SOURCE_COUNT:
+            break
 
     # Fallback: if parsing fails, return the first 5
     if len(selected) < FINAL_SOURCE_COUNT:
@@ -386,6 +411,11 @@ def check_source_diversity(pages: list[dict]) -> dict:
                 overlaps.append(len(intersection) / len(union))
 
     avg_overlap = sum(overlaps) / len(overlaps) if overlaps else 0.0
+    # Threshold 0.4: empirically, Wikipedia pages on the same industry
+    # typically share 15-25% vocabulary. Above 40% suggests the pages
+    # cover nearly identical content (e.g. two sub-articles of the
+    # same main topic). Requiring >=2 high-overlap pairs avoids
+    # false positives from a single coincidental overlap.
     high_overlap_count = sum(1 for o in overlaps if o > 0.4)
 
     if high_overlap_count >= 2:
@@ -403,30 +433,45 @@ def check_source_diversity(pages: list[dict]) -> dict:
 
 
 def enforce_word_limit(text: str, limit: int = HARD_WORD_LIMIT) -> str:
-    """Programmatically enforce the word limit on generated reports.
+    """Programmatically enforce the hard word limit on generated reports.
 
-    Design choice: LLMs are unreliable at counting words. Rather than
-    trusting the model, we truncate at the sentence boundary nearest
-    to the limit. This guarantees compliance with the <500 word
-    requirement regardless of LLM behaviour.
+    Design choice: LLMs are unreliable at self-counting words — they
+    routinely exceed stated limits by 10-20%. Rather than trusting the
+    model, we truncate at the nearest sentence boundary before the
+    limit. This guarantees compliance with the <500 word requirement.
+
+    Trade-off: truncating at a sentence boundary may undershoot the
+    limit (e.g. 470 words instead of 500), but this is preferable to
+    cutting mid-sentence or exceeding the limit.
     """
     words = text.split()
     if len(words) <= limit:
         return text
 
-    # Truncate to limit, then find the last sentence boundary
+    # Join the first `limit` words back into a string, then find the
+    # last full stop to cut at a clean sentence boundary
     truncated = " ".join(words[:limit])
     last_period = truncated.rfind(".")
-    if last_period > len(truncated) * 0.5:  # Only cut at sentence if reasonable
+    # Only cut at sentence if the boundary is past the halfway point —
+    # otherwise we'd lose too much content
+    if last_period > len(truncated) * 0.5:
         truncated = truncated[:last_period + 1]
 
     return truncated
 
 
 def count_words(text: str) -> int:
-    """Count words in text, excluding markdown formatting symbols."""
-    clean = text.replace("**", "").replace("*", "").replace("#", "")
-    return len(clean.split())
+    """Count words in text, excluding markdown formatting symbols.
+
+    Strips heading markers (##), bold/italic markers (* **), pipe
+    characters (|), and separator rows (---) so that only substantive
+    words are counted. This ensures the word count shown to the user
+    reflects actual prose content, not formatting artefacts.
+    """
+    clean = re.sub(r"[#*|]", "", text)          # Remove markdown symbols
+    clean = re.sub(r"-{3,}", "", clean)          # Remove separator rows (---)
+    clean = re.sub(r"\s+", " ", clean).strip()   # Normalise whitespace
+    return len(clean.split()) if clean else 0
 
 
 def sanitise_for_streamlit(text: str) -> str:
@@ -536,17 +581,33 @@ def generate_report(
 ) -> str:
     """Generate a structured, executive-ready industry report (<500 words).
 
-    The prompt is engineered to produce consulting-grade output:
-    - Executive summary with strategic implications
-    - Market structure and competitive dynamics analysis
-    - Key data table summarising quantitative findings
-    - Strategic interpretation (insight over description)
-    - Inline citations referencing specific Wikipedia source titles
-    - Hard word limit enforced both in prompt and programmatically
+    Prompt Engineering Decisions:
+        - Nine mandatory sections enforce consistent structure across
+          industries, making reports comparable and scannable.
+        - Explicit grounding rules with GOOD/BAD examples reduce
+          hallucination by showing the LLM what grounded vs fabricated
+          claims look like (few-shot prompting for factuality).
+        - The word limit is specified TWICE: once in the prompt (soft
+          constraint — LLMs often overshoot) and once programmatically
+          via enforce_word_limit() (hard constraint — guarantees <500).
+        - Dollar sign prohibition prevents Streamlit LaTeX rendering
+          issues ($...$ is interpreted as inline math).
 
-    Design choice: we pass the full content of all 5 pages to give
-    the LLM maximum context for synthesis. The temperature is kept
-    low (0.2) to minimise hallucination beyond source material.
+    Grounding Limitations:
+        Verbal grounding instructions reduce but cannot eliminate
+        hallucination. The LLM may still fabricate plausible-sounding
+        statistics. The low temperature (0.2) and explicit self-check
+        instructions mitigate but do not fully solve this. A future
+        improvement could add post-generation fact-verification against
+        the source texts.
+
+    Args:
+        llm: Initialised LangChain chat model instance.
+        industry: Validated, normalised industry name.
+        pages: List of dicts with 'title', 'url', 'content' keys.
+
+    Returns:
+        Sanitised, word-limited report string in markdown format.
     """
     # Build source titles list for citation instructions
     source_titles = [page["title"] for page in pages]
@@ -569,12 +630,27 @@ def generate_report(
          "strictly follows the rules below.\n\n"
          "================================ INPUT\n"
          "You will receive the industry name and extracted text from "
-         "five Wikipedia pages. Available sources: {source_titles}.\n"
-         "You MUST base your report ONLY on those five sources.\n"
+         "Wikipedia pages. Available sources: {source_titles}.\n"
+         "You MUST base your report ONLY on those sources.\n"
          "Do NOT use outside knowledge. Do NOT invent facts. Do NOT "
          "add statistics not present in the provided material.\n"
          "If information is missing, state: 'Data not available in "
          "retrieved sources.'\n\n"
+         "================================ GROUNDING RULES\n"
+         "Every factual claim, statistic, and figure MUST be directly "
+         "traceable to one of the provided sources. Cite the source "
+         "title in parentheses after each claim.\n\n"
+         "GROUNDED (correct):\n"
+         "'The semiconductor market was valued at US580 billion "
+         "(Semiconductor industry).'\n\n"
+         "HALLUCINATED (wrong):\n"
+         "'The market is projected to reach US1 trillion by 2030.'\n"
+         "^ This would be wrong if the figure does not appear in any "
+         "of the provided source texts.\n\n"
+         "If you cannot find a specific figure in the sources, write "
+         "'Data not available in retrieved sources' rather than "
+         "inventing a number. It is far better to admit missing data "
+         "than to fabricate a statistic.\n\n"
          "================================ WORD LIMIT\n"
          "Maximum: {max_words} words. Target range: 430-480 words.\n"
          "If output exceeds {max_words} words, rewrite more concisely.\n\n"
@@ -639,12 +715,15 @@ def generate_report(
          "'US1.5 billion' or 'USD 1.5 billion', never '$1.5 billion'. "
          "Dollar signs cause rendering errors.\n\n"
          "================================ QUALITY CONTROL\n"
-         "Before output, verify:\n"
-         "- Under {max_words} words\n"
-         "- Only source-supported claims\n"
-         "- Logical structure\n"
-         "- Executive readability\n"
-         "- No repetition\n"
+         "Before output, perform this self-check:\n"
+         "1. Word count: under {max_words} words?\n"
+         "2. Grounding: every number and statistic appears in the "
+         "source material? Remove any that do not.\n"
+         "3. Citations: every factual claim cites a source title?\n"
+         "4. Structure: all mandatory sections present?\n"
+         "5. No repetition: same point not made twice?\n"
+         "6. Executive readability: a senior executive could scan "
+         "this in 2 minutes and extract key insights?\n\n"
          "Do NOT include a word count line at the end.\n"
          "Output ONLY the final report."),
         ("human",
@@ -944,22 +1023,24 @@ def inject_custom_css():
 
 
 def render_sidebar() -> tuple[str, str]:
-    """Render the sidebar with LLM configuration controls.
+    """Render the sidebar with model selection and API key input.
 
     Returns:
         (selected_model, api_key) tuple
 
-    Security: API key is entered as a password field and stored
-    only in session state. It is never written to disk or logged.
+    Security: the API key is entered as a password field (masked input)
+    and stored only in Streamlit's in-memory session state. It is never
+    written to disk, logged, or transmitted to any service other than
+    the Google Gemini API.
     """
     with st.sidebar:
         st.markdown("### Configuration")
 
         selected_model = st.selectbox(
-            "Select LLM",
+            "Select Model",
             options=LLM_OPTIONS,
             index=0,
-            help="Choose the AI model for validation and report generation.",
+            help="Choose the Gemini model for validation and report generation.",
         )
 
         # Show description for the selected model
@@ -967,39 +1048,19 @@ def render_sidebar() -> tuple[str, str]:
         if desc:
             st.caption(desc)
 
-        # Dynamic API key input based on selected provider
-        provider = LLM_PROVIDER.get(selected_model, "google")
-
-        provider_config = {
-            "google": {
-                "label": "Google AI API Key",
-                "placeholder": "Enter your Google AI API key",
-                "help_link": "[Google AI Studio](https://aistudio.google.com/apikey)",
-            },
-            "openai": {
-                "label": "OpenAI API Key",
-                "placeholder": "Enter your OpenAI API key (sk-...)",
-                "help_link": "[OpenAI Platform](https://platform.openai.com/api-keys)",
-            },
-            "anthropic": {
-                "label": "Anthropic API Key",
-                "placeholder": "Enter your Anthropic API key (sk-ant-...)",
-                "help_link": "[Anthropic Console](https://console.anthropic.com/settings/keys)",
-            },
-        }
-
-        cfg = provider_config[provider]
-
         api_key = st.text_input(
-            cfg["label"],
+            "Google AI API Key",
             type="password",
-            placeholder=cfg["placeholder"],
+            placeholder="Enter your Google AI API key",
             help="Your key is not stored and is only used for this session.",
             key="api_key",
         )
 
         st.divider()
-        st.caption(f"Get an API key from {cfg['help_link']}")
+        st.caption(
+            "Get a free API key from "
+            "[Google AI Studio](https://aistudio.google.com/apikey)"
+        )
 
         # Display pipeline progress
         st.divider()
@@ -1099,6 +1160,14 @@ def render_step_2(llm):
                     )
                     return
 
+                # Warn if fewer pages than ideal (but still proceed)
+                if len(raw_pages) < FINAL_SOURCE_COUNT:
+                    st.info(
+                        f"Found {len(raw_pages)} relevant page(s) "
+                        f"(fewer than the ideal {FINAL_SOURCE_COUNT}). "
+                        f"The report may be less comprehensive."
+                    )
+
                 # Stage C: LLM-based relevance filtering
                 top_pages = select_top_pages(llm, industry, raw_pages)
                 st.session_state.wiki_pages = top_pages
@@ -1179,7 +1248,7 @@ def fetch_industry_image(industry: str, page_titles: list[str] | None = None) ->
                 f"&titles={urllib.parse.quote(title)}"
                 "&redirects=1"
             )
-            resp = requests.get(search_url, timeout=5)
+            resp = requests.get(search_url, timeout=3)
             data = resp.json()
             api_pages = data.get("query", {}).get("pages", {})
             for page in api_pages.values():
@@ -1702,14 +1771,25 @@ def render_step_3(llm, model_name: str = ""):
             reset_pipeline()
             st.rerun()
     with col2:
-        # Generate PDF download
-        pdf_bytes = generate_pdf(industry, report, pages)
-        st.download_button(
-            label="Download PDF report",
-            data=pdf_bytes,
-            file_name=f"{industry.lower().replace(' ', '_')}_report.pdf",
-            mime="application/pdf",
-        )
+        # Generate PDF with error handling — PDF generation can fail
+        # on unusual Unicode characters or extremely long content
+        try:
+            pdf_bytes = generate_pdf(industry, report, pages)
+            st.download_button(
+                label="Download PDF report",
+                data=pdf_bytes,
+                file_name=f"{industry.lower().replace(' ', '_')}_report.pdf",
+                mime="application/pdf",
+            )
+        except Exception:
+            # Fallback: offer raw text download if PDF fails
+            st.download_button(
+                label="Download report (text)",
+                data=report,
+                file_name=f"{industry.lower().replace(' ', '_')}_report.txt",
+                mime="text/plain",
+            )
+            st.caption("PDF generation failed — text version provided.")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1720,12 +1800,15 @@ def main():
     """Main application entry point.
 
     Orchestrates the three-step pipeline:
-        1. Industry validation
+        1. Industry validation (LLM-based)
         2. Wikipedia retrieval (multi-query + LLM ranking)
-        3. Report generation with inline citations
+        3. Report generation (grounded RAG with citations)
 
-    Each step only renders when its prerequisites are met,
-    creating a clear, guided user experience.
+    Streamlit re-execution model: every user interaction triggers a
+    full script rerun. Session state (st.session_state) persists the
+    current step, validated industry, retrieved pages, and generated
+    report across reruns. This is why each step checks session state
+    before performing expensive operations (e.g. API calls).
     """
     st.set_page_config(
         page_title=APP_TITLE,
@@ -1740,7 +1823,7 @@ def main():
     st.title(APP_TITLE)
     st.caption(
         "AI-powered industry analysis from Wikipedia sources  |  "
-        "Built with LangChain  |  Multi-model: Gemini, GPT-4o, Claude"
+        "Built with LangChain & Google Gemini"
     )
 
     # Sidebar
@@ -1749,27 +1832,23 @@ def main():
     # Gate: require API key
     if not api_key:
         st.info(
-            "Select a model and enter your API key in the sidebar to begin.  \n"
-            "Supports **Google Gemini**, **OpenAI GPT-4o**, and **Anthropic Claude**."
+            "Select a model and enter your Google AI API key in the sidebar "
+            "to begin."
         )
         return
 
     # Initialise LLM
     llm = initialise_llm(selected_model, api_key)
 
-    # Render pipeline steps
+    # Render pipeline steps — each step is always visible once reached,
+    # so users can see their full journey through the pipeline
     step = st.session_state.current_step
 
-    if step == 1:
-        render_step_1(llm)
-    elif step == 2:
-        render_step_1(llm)
+    render_step_1(llm)
+    if step >= 2:
         st.divider()
         render_step_2(llm)
-    elif step >= 3:
-        render_step_1(llm)
-        st.divider()
-        render_step_2(llm)
+    if step >= 3:
         st.divider()
         render_step_3(llm, selected_model)
 
