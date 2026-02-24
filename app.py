@@ -1219,7 +1219,8 @@ def render_step_2(llm):
         st.rerun()
 
 
-def fetch_industry_image(industry: str, page_titles: list[str] | None = None) -> str | None:
+@st.cache_data(show_spinner=False, ttl=600)
+def fetch_industry_image(industry: str, page_titles: tuple | None = None) -> str | None:
     """Attempt to fetch a relevant thumbnail image URL from Wikipedia.
 
     Strategy:
@@ -1227,10 +1228,12 @@ def fetch_industry_image(industry: str, page_titles: list[str] | None = None) ->
         2. If that fails, try each retrieved Wikipedia page title
         3. Returns the first image URL found, or None
 
-    Design choice: visual elements make the report feel more
-    professional and are rewarded in the marking rubric under
-    'structure and coherence'. We only use images from Wikipedia
-    (the same source as our data) to maintain source consistency.
+    Cached with @st.cache_data to avoid re-fetching on every Streamlit
+    rerun. The ttl=600 (10 minutes) ensures fresh images if the user
+    researches a different industry in the same session.
+
+    Note: page_titles is a tuple (not list) because st.cache_data
+    requires hashable arguments for its cache key.
     """
     import urllib.parse
     import requests
@@ -1535,6 +1538,48 @@ def render_report_section(heading: str, body: str):
             st.markdown(sanitise_for_streamlit(body))
 
 
+def sanitise_for_pdf(text: str) -> str:
+    """Replace Unicode characters that fpdf2's built-in fonts cannot encode.
+
+    fpdf2's Helvetica (a core PDF font) only supports the latin-1 character
+    set. Wikipedia content frequently contains em-dashes, smart quotes,
+    non-breaking spaces, and other Unicode characters that cause
+    UnicodeEncodeError during PDF generation.
+
+    This function maps common problematic characters to safe latin-1
+    equivalents, then strips anything remaining that is outside latin-1.
+    """
+    replacements = {
+        "\u2013": "-",    # en-dash
+        "\u2014": " - ",  # em-dash
+        "\u2015": " - ",  # horizontal bar
+        "\u2018": "'",    # left single quote
+        "\u2019": "'",    # right single quote (apostrophe)
+        "\u201c": '"',    # left double quote
+        "\u201d": '"',    # right double quote
+        "\u2026": "...",  # ellipsis
+        "\u00a0": " ",    # non-breaking space
+        "\u2010": "-",    # hyphen
+        "\u2011": "-",    # non-breaking hyphen
+        "\u2012": "-",    # figure dash
+        "\u00b7": " ",    # middle dot
+        "\u2022": "-",    # bullet
+        "\u2023": "-",    # triangular bullet
+        "\u25cf": "-",    # black circle
+        "\u00d7": "x",    # multiplication sign
+        "\u2264": "<=",   # less than or equal
+        "\u2265": ">=",   # greater than or equal
+        "\u00b1": "+/-",  # plus-minus sign
+    }
+    for char, replacement in replacements.items():
+        text = text.replace(char, replacement)
+    # Strip any remaining non-latin-1 characters to prevent encoding errors
+    text = text.encode("latin-1", errors="replace").decode("latin-1")
+    # Also strip markdown bold markers
+    text = text.replace("**", "")
+    return text
+
+
 def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
     """Generate a professionally formatted PDF of the industry report.
 
@@ -1548,6 +1593,10 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
     Design choice: PDF output gives the user a portable, presentation-
     ready document suitable for sharing with stakeholders. fpdf2 was
     chosen over reportlab for its smaller footprint and simpler API.
+
+    All text is sanitised through sanitise_for_pdf() before rendering
+    to prevent UnicodeEncodeError from non-latin-1 characters in
+    Wikipedia source content.
     """
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=20)
@@ -1559,7 +1608,10 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
 
     pdf.set_font("Helvetica", "B", 24)
     pdf.set_text_color(0, 58, 112)  # McKinsey navy #003A70
-    pdf.cell(0, 14, txt=industry, new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.cell(
+        0, 14, txt=sanitise_for_pdf(industry),
+        new_x="LMARGIN", new_y="NEXT", align="C",
+    )
 
     pdf.set_font("Helvetica", "", 11)
     pdf.set_text_color(100, 100, 100)
@@ -1582,7 +1634,10 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
         # Section heading
         pdf.set_font("Helvetica", "B", 13)
         pdf.set_text_color(0, 58, 112)  # McKinsey navy
-        pdf.cell(0, 10, txt=heading, new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(
+            0, 10, txt=sanitise_for_pdf(heading),
+            new_x="LMARGIN", new_y="NEXT",
+        )
         pdf.ln(1)
 
         if not body:
@@ -1596,8 +1651,7 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
             if pre_text:
                 pdf.set_font("Helvetica", "", 10)
                 pdf.set_text_color(40, 40, 40)
-                clean_text = pre_text.replace("**", "")
-                pdf.multi_cell(0, 6, txt=clean_text)
+                pdf.multi_cell(0, 6, txt=sanitise_for_pdf(pre_text))
                 pdf.ln(2)
 
             # Render table
@@ -1612,7 +1666,11 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
             pdf.set_fill_color(0, 58, 112)  # McKinsey navy
             pdf.set_text_color(255, 255, 255)
             for header in headers:
-                pdf.cell(col_width, 7, txt=header[:30], border=1, fill=True, align="C")
+                pdf.cell(
+                    col_width, 7,
+                    txt=sanitise_for_pdf(header)[:30],
+                    border=1, fill=True, align="C",
+                )
             pdf.ln()
 
             # Table data rows
@@ -1624,7 +1682,7 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
                 else:
                     pdf.set_fill_color(255, 255, 255)
                 for j, cell in enumerate(row):
-                    cell_text = cell[:30] if j < num_cols else ""
+                    cell_text = sanitise_for_pdf(cell)[:30] if j < num_cols else ""
                     pdf.cell(
                         col_width, 7, txt=cell_text,
                         border=1, fill=True, align="C",
@@ -1637,15 +1695,13 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
             if post_text:
                 pdf.set_font("Helvetica", "", 10)
                 pdf.set_text_color(40, 40, 40)
-                clean_text = post_text.replace("**", "")
-                pdf.multi_cell(0, 6, txt=clean_text)
+                pdf.multi_cell(0, 6, txt=sanitise_for_pdf(post_text))
                 pdf.ln(2)
         else:
             # Regular text section — use multi_cell for text wrapping
             pdf.set_font("Helvetica", "", 10)
             pdf.set_text_color(40, 40, 40)
-            clean_body = body.replace("**", "")
-            pdf.multi_cell(0, 6, txt=clean_body)
+            pdf.multi_cell(0, 6, txt=sanitise_for_pdf(body))
             pdf.ln(3)
 
     # ── References section ──
@@ -1662,7 +1718,7 @@ def generate_pdf(industry: str, report: str, pages: list[dict]) -> bytes:
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(40, 40, 40)
     for i, page in enumerate(pages, 1):
-        ref_text = f"[{i}] {page['title']} - {page['url']}"
+        ref_text = sanitise_for_pdf(f"[{i}] {page['title']} - {page['url']}")
         pdf.multi_cell(0, 5, txt=ref_text)
         pdf.ln(1)
 
@@ -1715,7 +1771,7 @@ def render_step_3(llm, model_name: str = ""):
     from datetime import date
     today = date.today().strftime("%B %d, %Y")
 
-    page_titles = [p["title"] for p in pages]
+    page_titles = tuple(p["title"] for p in pages)
     img_url = fetch_industry_image(industry, page_titles)
 
     model_badge = (
